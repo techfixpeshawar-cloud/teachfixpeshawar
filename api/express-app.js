@@ -1,290 +1,555 @@
+// server.ts
+import express from "express";
+import path from "path";
+import fs from "fs";
+import crypto from "crypto";
+import { createServer as createViteServer } from "vite";
+
+// server/firebaseAdmin.ts
+import { initializeApp, getApps, cert } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+import { getAuth } from "firebase-admin/auth";
+var _app = null;
+var _firestore = null;
+var _auth = null;
+var _hasServiceAccount = false;
+function initFirebaseAdmin() {
+  if (_app && _firestore && _auth) {
+    return { app: _app, db: _firestore, auth: _auth };
+  }
+  const existingApps = getApps();
+  if (existingApps.length > 0) {
+    _app = existingApps[0];
+  } else {
+    const base64Sa = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64?.trim();
+    if (base64Sa) {
+      try {
+        const decoded = Buffer.from(base64Sa, "base64").toString("utf-8");
+        const sa = JSON.parse(decoded);
+        _app = initializeApp({ credential: cert(sa) });
+        _hasServiceAccount = true;
+      } catch (err) {
+        console.warn("[FIREBASE ADMIN] Failed to parse FIREBASE_SERVICE_ACCOUNT_BASE64:", err?.message || err);
+      }
+    }
+    if (!_app) {
+      const projectId2 = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306").trim();
+      const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || "").trim();
+      let privateKey = (process.env.FIREBASE_PRIVATE_KEY || "").trim();
+      if (clientEmail && privateKey) {
+        try {
+          if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+            privateKey = privateKey.slice(1, -1);
+          }
+          privateKey = privateKey.replace(/\\n/g, "\n");
+          _app = initializeApp({
+            credential: cert({
+              projectId: projectId2,
+              clientEmail,
+              privateKey
+            })
+          });
+          _hasServiceAccount = true;
+        } catch (err) {
+          console.warn("[FIREBASE ADMIN] Failed to initialize with cert credentials:", err?.message || err);
+        }
+      }
+    }
+    if (!_app) {
+      const projectId2 = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306").trim();
+      _app = initializeApp({ projectId: projectId2 });
+    }
+  }
+  const dbId = (process.env.FIREBASE_DATABASE_ID || process.env.VITE_FIREBASE_DATABASE_ID || "ai-studio-peshawaronsitete-70e75457-6a23-4284-84ee-9bd0ef9c4555").trim();
+  try {
+    _firestore = dbId ? getFirestore(_app, dbId) : getFirestore(_app);
+  } catch (err) {
+    console.warn(`[FIREBASE ADMIN] Could not open named database '${dbId}', falling back to default:`, err?.message || err);
+    _firestore = getFirestore(_app);
+  }
+  _auth = getAuth(_app);
+  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306").trim();
+  console.log(`[FIREBASE ADMIN] Initialized. Project: ${projectId} | Named DB: ${dbId || "(default)"} | Service Account Auth: ${_hasServiceAccount}`);
+  return { app: _app, db: _firestore, auth: _auth };
+}
+function getAdminFirestore() {
+  if (!_firestore) {
+    initFirebaseAdmin();
+  }
+  return _firestore;
+}
+function getAdminAuth() {
+  if (!_auth) {
+    initFirebaseAdmin();
+  }
+  return _auth;
+}
+
+// server/email/emailService.ts
+import nodemailer from "nodemailer";
+var SETTINGS_EMAIL_DOC = "email";
+function sanitizeEmailSubject(rawSubject) {
+  if (!rawSubject) return "TechFix Peshawar On-Site Service Notification";
+  return rawSubject.replace(/\[VERIFIED TEST\]/gi, "TechFix Verification Test:").replace(/\[TEST\]/gi, "TechFix Test:").replace(/\[URGENT\]/gi, "Priority Notice:").replace(/\[CONFIRMED\]/gi, "Appointment Confirmed:").replace(/\[LEAD INQUIRY\]/gi, "Customer Inquiry:").replace(/\[RESENT INQUIRY\]/gi, "Inquiry Update:").replace(/\s{2,}/g, " ").trim();
+}
+function generateEmailFooterHtml(recipientEmail) {
+  return `
+  <!-- Deliverability & Authenticity Footer -->
+  <div style="background-color:#090d16; padding:20px 24px; text-align:center; border-top:1px solid #1e293b; font-size:11px; color:#64748b; line-height:1.6;">
+    <p style="margin:0 0 6px 0; font-weight:700; color:#cbd5e1; letter-spacing:0.3px;">
+      TechFix On-Site Computer Support & Hardware Diagnostics
+    </p>
+    <p style="margin:0 0 6px 0; color:#94a3b8;">
+      University Town, Saddar & Hayatabad, Peshawar, Khyber Pakhtunkhwa, Pakistan \u2022 Helpline: +92 327 5526107
+    </p>
+    <p style="margin:0; font-size:10px; color:#64748b;">
+      Authentic transactional service notification${recipientEmail ? ` for ${recipientEmail}` : ""}.
+    </p>
+  </div>
+  `;
+}
+async function getFullEmailSettings() {
+  let firestoreData = {};
+  try {
+    const db2 = getAdminFirestore();
+    const docSnap = await db2.collection("settings").doc(SETTINGS_EMAIL_DOC).get();
+    if (docSnap.exists) {
+      firestoreData = docSnap.data() || {};
+    }
+  } catch (err) {
+    console.warn("[EMAIL SERVICE] Firestore settings load note:", err?.message || err);
+  }
+  const provider = firestoreData.provider || process.env.EMAIL_PROVIDER || "auto";
+  const resendApiKey = (firestoreData.resendApiKey || process.env.RESEND_API_KEY || "").trim();
+  const senderEmail = (firestoreData.senderEmail || process.env.RESEND_FROM || process.env.FROM_EMAIL || "Peshawar Tech Support <onboarding@resend.dev>").trim();
+  const adminEmail = (firestoreData.adminEmail || process.env.TARGET_EMAIL || process.env.ADMIN_EMAIL || process.env.NOTIFICATION_TARGET_EMAIL || "techfixpeshawar@gmail.com").trim();
+  let smtpHost = (firestoreData.smtpHost || process.env.SMTP_HOST || "smtp.gmail.com").trim().replace(/^[a-zA-Z]+:\/\//, "").replace(/\/+$/, "");
+  if (!smtpHost || smtpHost === "gmail.com") smtpHost = "smtp.gmail.com";
+  const smtpPort = parseInt(
+    String(firestoreData.smtpPort || process.env.SMTP_PORT || "465"),
+    10
+  );
+  const smtpUser = (firestoreData.smtpUser || process.env.GMAIL_USER || process.env.GMAIL_ADDRESS || process.env.SMTP_USER || "techfixpeshawar@gmail.com").trim();
+  const smtpPassword = (firestoreData.smtpPassword || process.env.GMAIL_APP_PASSWORD || process.env.GOOGLE_APP_PASSWORD || process.env.SMTP_PASSWORD || process.env.SMTP_PASS || "").trim().replace(/\s+/g, "");
+  return {
+    provider,
+    senderEmail,
+    adminEmail,
+    resendApiKey,
+    smtpHost,
+    smtpPort,
+    smtpUser,
+    smtpPassword,
+    updatedAt: firestoreData.updatedAt
+  };
+}
+async function getSafeEmailSettings() {
+  const full = await getFullEmailSettings();
+  return {
+    provider: full.provider,
+    senderEmail: full.senderEmail,
+    adminEmail: full.adminEmail,
+    smtpHost: full.smtpHost || "smtp.gmail.com",
+    smtpPort: full.smtpPort || 465,
+    smtpUser: full.smtpUser || "techfixpeshawar@gmail.com",
+    resendApiKeyConfigured: !!(full.resendApiKey && full.resendApiKey.length >= 10),
+    smtpPasswordConfigured: !!(full.smtpPassword && full.smtpPassword.length >= 8),
+    gmailAppPasswordConfigured: !!(full.smtpPassword && full.smtpPassword.length === 16)
+  };
+}
+async function saveEmailSettings(incoming) {
+  const current = await getFullEmailSettings();
+  const updated = {
+    provider: incoming.provider || current.provider,
+    senderEmail: incoming.senderEmail ? incoming.senderEmail.trim() : current.senderEmail,
+    adminEmail: incoming.adminEmail ? incoming.adminEmail.trim() : current.adminEmail,
+    smtpHost: incoming.smtpHost ? incoming.smtpHost.trim() : current.smtpHost,
+    smtpPort: incoming.smtpPort ? Number(incoming.smtpPort) : current.smtpPort,
+    smtpUser: incoming.smtpUser ? incoming.smtpUser.trim() : current.smtpUser,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (incoming.clearResendApiKey) {
+    updated.resendApiKey = "";
+  } else if (incoming.resendApiKey && incoming.resendApiKey.trim().length > 0) {
+    updated.resendApiKey = incoming.resendApiKey.trim();
+  } else {
+    updated.resendApiKey = current.resendApiKey;
+  }
+  const incomingPassword = (incoming.smtpPassword || incoming.gmailAppPassword || "").trim().replace(/\s+/g, "");
+  if (incoming.clearSmtpPassword) {
+    updated.smtpPassword = "";
+  } else if (incomingPassword.length > 0) {
+    updated.smtpPassword = incomingPassword;
+  } else {
+    updated.smtpPassword = current.smtpPassword;
+  }
+  try {
+    const db2 = getAdminFirestore();
+    await db2.collection("settings").doc(SETTINGS_EMAIL_DOC).set(updated, { merge: true });
+    console.log(`[EMAIL SERVICE] Settings saved to Firestore (settings/email). Provider: ${updated.provider} | Resend Key Configured: ${!!updated.resendApiKey} | SMTP Pass Configured: ${!!updated.smtpPassword}`);
+  } catch (err) {
+    console.warn(`[EMAIL SERVICE] Firestore settings save note (requires FIREBASE_PRIVATE_KEY in production):`, err?.message || err);
+  }
+  return getSafeEmailSettings();
+}
+function createSmtpTransporter(host, port, user, pass) {
+  const secure = port === 465;
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+    connectionTimeout: 1e4,
+    greetingTimeout: 1e4
+  });
+}
+async function sendEmail(options) {
+  const config = await getFullEmailSettings();
+  const sentAt = (/* @__PURE__ */ new Date()).toISOString();
+  const recipient = (options.to || config.adminEmail).trim();
+  const cleanSubject = sanitizeEmailSubject(options.subject);
+  const plainText = options.text || (options.html ? options.html.replace(/<[^>]+>/g, " ") : "");
+  const replyTo = options.replyTo || config.adminEmail;
+  const resendKey = options.customResendKey?.trim() || config.resendApiKey || "";
+  const smtpUser = options.customGmailUser?.trim() || config.smtpUser || "";
+  const smtpPass = options.customGmailPass?.trim().replace(/\s+/g, "") || config.smtpPassword || "";
+  const smtpHost = config.smtpHost || "smtp.gmail.com";
+  const smtpPort = config.smtpPort || 465;
+  const fromAddress = config.senderEmail || "Peshawar Tech Support <onboarding@resend.dev>";
+  const requestedProvider = options.preferredProvider || config.provider || "auto";
+  async function deliverViaSmtp() {
+    if (!smtpUser || !smtpPass) {
+      return { ok: false, error: "SMTP username or password missing" };
+    }
+    try {
+      const transporter = createSmtpTransporter(smtpHost, smtpPort, smtpUser, smtpPass);
+      const info = await transporter.sendMail({
+        from: `"TechFix Peshawar Support" <${smtpUser}>`,
+        to: recipient,
+        replyTo,
+        subject: cleanSubject,
+        text: plainText,
+        html: options.html || `<div style="font-family: sans-serif; line-height: 1.6;">${plainText.replace(/\n/g, "<br/>")}</div>`,
+        headers: {
+          "X-Entity-Ref-ID": `techfix-${Date.now()}`,
+          "X-Priority": "3",
+          "Importance": "normal"
+        }
+      });
+      console.log(`[SMTP SUCCESS] Delivered to ${recipient}. Message ID: ${info.messageId}`);
+      return { ok: true, messageId: info.messageId };
+    } catch (err) {
+      console.warn(`[SMTP FAILED] ${err?.message || err}`);
+      return { ok: false, error: err?.message || "SMTP delivery rejected by host" };
+    }
+  }
+  async function deliverViaResend() {
+    if (!resendKey || !resendKey.startsWith("re_")) {
+      return { ok: false, error: "Resend API Key missing or invalid format (requires re_...)" };
+    }
+    try {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${resendKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: fromAddress,
+          to: [recipient],
+          subject: cleanSubject,
+          reply_to: replyTo,
+          html: options.html || `<div style="font-family: sans-serif; line-height: 1.6;">${plainText.replace(/\n/g, "<br/>")}</div>`,
+          text: plainText,
+          headers: {
+            "X-Entity-Ref-ID": `techfix-${Date.now()}`,
+            "X-Priority": "3",
+            "Importance": "normal"
+          }
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data?.id) {
+        console.log(`[RESEND SUCCESS] Delivered to ${recipient}. ID: ${data.id}`);
+        return { ok: true, messageId: data.id };
+      } else {
+        const msg = data?.message || `Resend returned HTTP ${res.status}`;
+        console.warn(`[RESEND FAILED] ${msg}`);
+        return { ok: false, error: msg };
+      }
+    } catch (err) {
+      console.warn(`[RESEND NETWORK ERROR] ${err?.message || err}`);
+      return { ok: false, error: err?.message || "Network error reaching Resend API" };
+    }
+  }
+  if (requestedProvider === "resend") {
+    const resendRes = await deliverViaResend();
+    if (resendRes.ok) {
+      return { success: true, provider: "resend", messageId: resendRes.messageId, sentTo: recipient, sentAt };
+    }
+    return { success: false, provider: "resend", error: resendRes.error, sentTo: recipient, sentAt };
+  }
+  if (requestedProvider === "gmail_smtp" || requestedProvider === "smtp") {
+    const smtpRes = await deliverViaSmtp();
+    if (smtpRes.ok) {
+      return { success: true, provider: "smtp", messageId: smtpRes.messageId, sentTo: recipient, sentAt };
+    }
+    return { success: false, provider: "smtp", error: smtpRes.error, sentTo: recipient, sentAt };
+  }
+  let primaryType = "resend";
+  let backupType = "smtp";
+  if (!resendKey && smtpPass) {
+    primaryType = "smtp";
+    backupType = "resend";
+  }
+  const primaryRes = primaryType === "resend" ? await deliverViaResend() : await deliverViaSmtp();
+  if (primaryRes.ok) {
+    return { success: true, provider: primaryType, messageId: primaryRes.messageId, sentTo: recipient, sentAt };
+  }
+  const failoverNote = `Primary (${primaryType.toUpperCase()}) failed: ${primaryRes.error}. Attempted backup (${backupType.toUpperCase()}).`;
+  console.warn(`[AUTO-FAILOVER] ${failoverNote}`);
+  const backupRes = backupType === "resend" ? await deliverViaResend() : await deliverViaSmtp();
+  if (backupRes.ok) {
+    return {
+      success: true,
+      provider: backupType,
+      messageId: backupRes.messageId,
+      failoverNote,
+      sentTo: recipient,
+      sentAt
+    };
+  }
+  const finalError = `Both email delivery methods failed. Primary (${primaryType}): ${primaryRes.error} | Backup (${backupType}): ${backupRes.error}`;
+  console.error(`[EMAIL DISPATCH FAILURE] ${finalError}`);
+  return {
+    success: false,
+    provider: "none",
+    error: finalError,
+    failoverNote,
+    sentTo: recipient,
+    sentAt
+  };
+}
+
+// server.ts
 if (!process.env.VERCEL) {
-  await import('dotenv/config');
+  await import("dotenv/config");
 }
-// Force default server timezone to Pakistan Standard Time (PKT - Asia/Karachi, UTC+5)
-process.env.TZ = 'Asia/Karachi';
-
-import express from 'express';
-import path from 'path';
-import fs from 'fs';
-import crypto from 'crypto';
-import nodemailer from 'nodemailer';
-import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
-import { getAdminFirestore, getAdminAuth } from './server/firebaseAdmin.ts';
-import {
-  sendEmail,
-  getFullEmailSettings,
-  getSafeEmailSettings,
-  saveEmailSettings,
-  sanitizeEmailSubject,
-  generateEmailFooterHtml
-} from './server/email/emailService.ts';
-
-const APP_ROOT = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
-
-// Time formatting helpers for Pakistan Standard Time (PKT, UTC+5)
-export function getPeshawarTimeString(date: Date | string | number = new Date()): string {
-  const d = typeof date === 'string' || typeof date === 'number' ? new Date(date) : date;
-  return d.toLocaleTimeString('en-US', {
-    timeZone: 'Asia/Karachi',
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
+process.env.TZ = "Asia/Karachi";
+var APP_ROOT = typeof __dirname !== "undefined" ? __dirname : process.cwd();
+function getPeshawarTimeString(date = /* @__PURE__ */ new Date()) {
+  const d = typeof date === "string" || typeof date === "number" ? new Date(date) : date;
+  return d.toLocaleTimeString("en-US", {
+    timeZone: "Asia/Karachi",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
     hour12: true
   });
 }
-
-export function getPeshawarShortTimeString(date: Date | string | number = new Date()): string {
-  const d = typeof date === 'string' || typeof date === 'number' ? new Date(date) : date;
-  return d.toLocaleTimeString('en-US', {
-    timeZone: 'Asia/Karachi',
-    hour: 'numeric',
-    minute: '2-digit',
+function getPeshawarShortTimeString(date = /* @__PURE__ */ new Date()) {
+  const d = typeof date === "string" || typeof date === "number" ? new Date(date) : date;
+  return d.toLocaleTimeString("en-US", {
+    timeZone: "Asia/Karachi",
+    hour: "numeric",
+    minute: "2-digit",
     hour12: true
   });
 }
-
-export function getPeshawarDateTimeString(date: Date | string | number = new Date()): string {
-  const d = typeof date === 'string' || typeof date === 'number' ? new Date(date) : date;
-  return d.toLocaleString('en-US', {
-    timeZone: 'Asia/Karachi',
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
+function getPeshawarDateTimeString(date = /* @__PURE__ */ new Date()) {
+  const d = typeof date === "string" || typeof date === "number" ? new Date(date) : date;
+  return d.toLocaleString("en-US", {
+    timeZone: "Asia/Karachi",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
     hour12: true
   });
 }
-
-const app = express();
-const PORT = 3000;
-// On Vercel the project filesystem is read-only; /tmp is the only writable location.
-// On local/self-hosted we keep the original path so existing data.json is used.
-const IS_VERCEL = !!process.env.VERCEL;
-const DB_FILE = IS_VERCEL
-  ? path.join('/tmp', 'techfix_database.json')
-  : path.join(process.cwd(), 'data', 'database.json');
-
-// ─────────────────────────────────────────────────────────────────
-// Firebase Admin SDK — Production Persistent Storage
-// Uses Firebase Admin SDK for privileged Firestore and Auth operations
-// ─────────────────────────────────────────────────────────────────
-function getFirestoreInstance() {
-  return getAdminFirestore();
-}
-
+var app = express();
+var PORT = 3e3;
+var IS_VERCEL = !!process.env.VERCEL;
+var DB_FILE = IS_VERCEL ? path.join("/tmp", "techfix_database.json") : path.join(process.cwd(), "data", "database.json");
 function getFirebaseAdminAuthInstance() {
   return getAdminAuth();
 }
-
-const FIREBASE_CLIENT_CONFIG = {
+var FIREBASE_CLIENT_CONFIG = {
   apiKey: process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY || "",
   projectId: process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306"
 };
-
-async function verifyFirebaseIdTokenFallback(idToken: string): Promise<string | null> {
-  if (!idToken || typeof idToken !== 'string') return null;
+async function verifyFirebaseIdTokenFallback(idToken) {
+  if (!idToken || typeof idToken !== "string") return null;
   const apiKey = FIREBASE_CLIENT_CONFIG.apiKey;
   if (!apiKey) return null;
-
   try {
     const url = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`;
     const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ idToken })
     });
-
     if (response.ok) {
-      const data: any = await response.json();
+      const data = await response.json();
       const user = data.users && data.users[0];
       if (user && user.email) {
         return user.email.toLowerCase();
       }
     }
   } catch (err) {
-    console.warn('[AUTH] Firebase REST token verification note:', (err as any)?.message);
+    console.warn("[AUTH] Firebase REST token verification note:", err?.message);
   }
   return null;
 }
-
-const SESSION_SECRET = (process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_SECRET || 'peshawar-techfix-secure-session-key-2026').trim();
-
-export function generateAdminSessionToken(adminIdentifier = 'admin'): string {
+var SESSION_SECRET = (process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_SECRET || "peshawar-techfix-secure-session-key-2026").trim();
+function generateAdminSessionToken(adminIdentifier = "admin") {
   const issuedAt = Date.now();
-  const nonce = crypto.randomBytes(16).toString('hex');
+  const nonce = crypto.randomBytes(16).toString("hex");
   const payload = `${adminIdentifier}:${issuedAt}:${nonce}`;
-  const signature = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
-  return `techfix_sess_${Buffer.from(payload).toString('base64url')}_${signature}`;
+  const signature = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
+  return `techfix_sess_${Buffer.from(payload).toString("base64url")}_${signature}`;
 }
-
-export function verifyAdminSessionToken(token: string): boolean {
-  if (!token || typeof token !== 'string') return false;
-  if (!token.startsWith('techfix_sess_')) return false;
-
-  const parts = token.slice('techfix_sess_'.length).split('_');
+function verifyAdminSessionToken(token) {
+  if (!token || typeof token !== "string") return false;
+  if (!token.startsWith("techfix_sess_")) return false;
+  const parts = token.slice("techfix_sess_".length).split("_");
   if (parts.length !== 2) return false;
-
   const [encodedPayload, signature] = parts;
   try {
-    const payload = Buffer.from(encodedPayload, 'base64url').toString('utf8');
-    const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
-
+    const payload = Buffer.from(encodedPayload, "base64url").toString("utf8");
+    const expectedSig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
     const sigBuf = Buffer.from(signature);
     const expBuf = Buffer.from(expectedSig);
     if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
       return false;
     }
-
-    const [, issuedAtStr] = payload.split(':');
+    const [, issuedAtStr] = payload.split(":");
     const issuedAt = parseInt(issuedAtStr, 10);
-    const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days session
-    if (isNaN(issuedAt) || Date.now() - issuedAt > maxAgeMs || Date.now() < issuedAt - 60000) {
+    const maxAgeMs = 7 * 24 * 60 * 60 * 1e3;
+    if (isNaN(issuedAt) || Date.now() - issuedAt > maxAgeMs || Date.now() < issuedAt - 6e4) {
       return false;
     }
-
     return true;
   } catch {
     return false;
   }
 }
-
-function validateImageMagicBytes(buffer: Buffer): { valid: boolean; ext: string } {
-  if (!buffer || buffer.length < 12) return { valid: false, ext: '' };
-
-  // PNG: 89 50 4E 47
-  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
-    return { valid: true, ext: 'png' };
+function validateImageMagicBytes(buffer) {
+  if (!buffer || buffer.length < 12) return { valid: false, ext: "" };
+  if (buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71) {
+    return { valid: true, ext: "png" };
   }
-  // JPEG: FF D8 FF
-  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
-    return { valid: true, ext: 'jpg' };
+  if (buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) {
+    return { valid: true, ext: "jpg" };
   }
-  // WebP: RIFF (52 49 46 46) .... WEBP (57 45 42 50)
-  if (
-    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
-    buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
-  ) {
-    return { valid: true, ext: 'webp' };
+  if (buffer[0] === 82 && buffer[1] === 73 && buffer[2] === 70 && buffer[3] === 70 && buffer[8] === 87 && buffer[9] === 69 && buffer[10] === 66 && buffer[11] === 80) {
+    return { valid: true, ext: "webp" };
   }
-  // GIF: GIF8
-  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
-    return { valid: true, ext: 'gif' };
+  if (buffer[0] === 71 && buffer[1] === 73 && buffer[2] === 70 && buffer[3] === 56) {
+    return { valid: true, ext: "gif" };
   }
-
-  return { valid: false, ext: '' };
+  return { valid: false, ext: "" };
 }
-
-// ─── CREDENTIAL FIELDS — only these are sensitive and must never be exposed
-//     in public API responses. All other fields are safe to return publicly.
-const CREDENTIAL_FIELDS = [
-  'gmailAppPassword', 'resendApiKey', 'adminPassword', 'apiSecret',
-  'smtpPassword', 'smtpUser', 'brevoApiKey', 'googleAppPassword'
+var CREDENTIAL_FIELDS = [
+  "gmailAppPassword",
+  "resendApiKey",
+  "adminPassword",
+  "apiSecret",
+  "smtpPassword",
+  "smtpUser",
+  "brevoApiKey",
+  "googleAppPassword"
 ];
-
-async function saveSettingsToFirestore(settings: any): Promise<void> {
+async function saveSettingsToFirestore(settings) {
   try {
     const fsDb = getAdminFirestore();
-    const ref = fsDb.collection('settings').doc('site_config');
-    // Strip sensitive credential keys before saving to site_config
-    const clean: any = {};
+    const ref = fsDb.collection("settings").doc("site_config");
+    const clean = {};
     for (const [k, v] of Object.entries(settings)) {
-      if (typeof v !== 'function' && typeof v !== 'undefined' && !CREDENTIAL_FIELDS.includes(k)) {
+      if (typeof v !== "function" && typeof v !== "undefined" && !CREDENTIAL_FIELDS.includes(k)) {
         clean[k] = v;
       }
     }
-    await ref.set({ ...clean, _updatedAt: new Date().toISOString() }, { merge: true });
-    console.log('[FIRESTORE] ✅ Public settings saved to Firestore (settings/site_config)');
+    await ref.set({ ...clean, _updatedAt: (/* @__PURE__ */ new Date()).toISOString() }, { merge: true });
+    console.log("[FIRESTORE] \u2705 Public settings saved to Firestore (settings/site_config)");
   } catch (err) {
-    console.error('[FIRESTORE] ❌ Save failed:', err);
+    console.error("[FIRESTORE] \u274C Save failed:", err);
   }
 }
-
-async function loadSettingsFromFirestore(): Promise<Record<string, any> | null> {
+async function loadSettingsFromFirestore() {
   try {
     const fsDb = getAdminFirestore();
-    const ref = fsDb.collection('settings').doc('site_config');
+    const ref = fsDb.collection("settings").doc("site_config");
     const snap = await ref.get();
-
     if (snap.exists) {
-      const data: any = snap.data();
+      const data = snap.data();
       delete data._updatedAt;
       delete data._migratedFromAdmin;
-      console.log('[FIRESTORE] ✅ Settings loaded from Firestore (settings/site_config)');
+      console.log("[FIRESTORE] \u2705 Settings loaded from Firestore (settings/site_config)");
       return data;
     }
-    console.log('[FIRESTORE] No saved settings in Firestore yet — using defaults');
+    console.log("[FIRESTORE] No saved settings in Firestore yet \u2014 using defaults");
     return null;
   } catch (err) {
-    console.error('[FIRESTORE] ❌ Load failed:', err);
+    console.error("[FIRESTORE] \u274C Load failed:", err);
     return null;
   }
 }
-
-async function syncDocToFirestore(collectionName: string, docId: string, data: any): Promise<void> {
+async function syncDocToFirestore(collectionName, docId, data) {
   try {
     const fsDb = getAdminFirestore();
     await fsDb.collection(collectionName).doc(String(docId)).set(data, { merge: true });
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[FIRESTORE] Sync ${collectionName}/${docId} error:`, err?.message || err);
   }
 }
-
-async function deleteDocFromFirestore(collectionName: string, docId: string): Promise<void> {
+async function deleteDocFromFirestore(collectionName, docId) {
   try {
     const fsDb = getAdminFirestore();
     await fsDb.collection(collectionName).doc(String(docId)).delete();
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[FIRESTORE] Delete ${collectionName}/${docId} error:`, err?.message || err);
   }
 }
-
-// ─────────────────────────────────────────────────────────────────
-// Problem Leads — Firestore Persistence
-// Authoritative persistence in Firestore collection 'inquiries' (with type='problem-lead')
-// ─────────────────────────────────────────────────────────────────
-async function saveProblemLeadToFirestore(lead: any): Promise<void> {
+async function saveProblemLeadToFirestore(lead) {
   try {
     const fsDb = getAdminFirestore();
     if (!lead?.id) return;
-    const ref = fsDb.collection('inquiries').doc(String(lead.id));
-    const clean: any = {};
+    const ref = fsDb.collection("inquiries").doc(String(lead.id));
+    const clean = {};
     for (const [k, v] of Object.entries(lead)) {
-      if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
+      if (typeof v !== "function" && typeof v !== "undefined") clean[k] = v;
     }
     await ref.set({
       ...clean,
-      type: 'problem-lead',
-      _updatedAt: new Date().toISOString()
+      type: "problem-lead",
+      _updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     }, { merge: true });
-    console.log(`[FIRESTORE] ✅ Problem lead saved: ${lead.id}`);
+    console.log(`[FIRESTORE] \u2705 Problem lead saved: ${lead.id}`);
   } catch (err) {
-    console.error(`[FIRESTORE] ❌ Problem lead save failed (${lead?.id}):`, err);
+    console.error(`[FIRESTORE] \u274C Problem lead save failed (${lead?.id}):`, err);
   }
 }
-
-async function deleteProblemLeadFromFirestore(id: string): Promise<void> {
+async function deleteProblemLeadFromFirestore(id) {
   try {
     const fsDb = getAdminFirestore();
     if (!id) return;
-    await fsDb.collection('inquiries').doc(String(id)).delete();
-    console.log(`[FIRESTORE] ✅ Problem lead deleted: ${id}`);
+    await fsDb.collection("inquiries").doc(String(id)).delete();
+    console.log(`[FIRESTORE] \u2705 Problem lead deleted: ${id}`);
   } catch (err) {
-    console.error(`[FIRESTORE] ❌ Problem lead delete failed (${id}):`, err);
+    console.error(`[FIRESTORE] \u274C Problem lead delete failed (${id}):`, err);
   }
 }
-
-async function loadProblemLeadsFromFirestore(): Promise<any[]> {
+async function loadProblemLeadsFromFirestore() {
   try {
     const fsDb = getAdminFirestore();
-    const snap = await fsDb.collection('inquiries').where('type', '==', 'problem-lead').get();
+    const snap = await fsDb.collection("inquiries").where("type", "==", "problem-lead").get();
     if (!snap.empty) {
-      const items: any[] = [];
-      snap.docs.forEach(d => {
+      const items = [];
+      snap.docs.forEach((d) => {
         const data = d.data();
-        const item: any = { id: d.id, ...data };
+        const item = { id: d.id, ...data };
         delete item._updatedAt;
         items.push(item);
       });
@@ -292,148 +557,102 @@ async function loadProblemLeadsFromFirestore(): Promise<any[]> {
       return items;
     }
   } catch (err) {
-    console.error('[FIRESTORE] ❌ Problem leads load failed:', err);
+    console.error("[FIRESTORE] \u274C Problem leads load failed:", err);
   }
   return [];
 }
-
-// ─────────────────────────────────────────────────────────────────
-// Problem Solutions — Firestore Persistence
-// Authoritative persistence in Firestore doc 'settings/problem_solutions'
-// ─────────────────────────────────────────────────────────────────
-async function saveProblemSolutionsToFirestore(solutions: any[]): Promise<void> {
+async function saveProblemSolutionsToFirestore(solutions) {
   try {
     const fsDb = getAdminFirestore();
     if (!Array.isArray(solutions)) return;
-    const cleanList = solutions.map(item => {
-      const clean: any = {};
+    const cleanList = solutions.map((item) => {
+      const clean = {};
       for (const [k, v] of Object.entries(item)) {
-        if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
+        if (typeof v !== "function" && typeof v !== "undefined") clean[k] = v;
       }
       return clean;
     });
-    await fsDb.collection('settings').doc('problem_solutions').set({
+    await fsDb.collection("settings").doc("problem_solutions").set({
       items: cleanList,
-      _updatedAt: new Date().toISOString()
+      _updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     }, { merge: true });
-    console.log(`[FIRESTORE] ✅ ${solutions.length} Problem solutions saved`);
+    console.log(`[FIRESTORE] \u2705 ${solutions.length} Problem solutions saved`);
   } catch (err) {
-    console.error('[FIRESTORE] ❌ Problem solutions save failed:', err);
+    console.error("[FIRESTORE] \u274C Problem solutions save failed:", err);
   }
 }
-
-async function loadProblemSolutionsFromFirestore(): Promise<any[] | null> {
+async function loadProblemSolutionsFromFirestore() {
   try {
     const fsDb = getAdminFirestore();
-    const snap = await fsDb.collection('settings').doc('problem_solutions').get();
+    const snap = await fsDb.collection("settings").doc("problem_solutions").get();
     if (snap.exists) {
       const data = snap.data();
       if (Array.isArray(data?.items)) {
-        console.log(`[FIRESTORE] ✅ ${data.items.length} Problem solutions loaded from Firestore`);
+        console.log(`[FIRESTORE] \u2705 ${data.items.length} Problem solutions loaded from Firestore`);
         return data.items;
       }
     }
   } catch (err) {
-    console.error('[FIRESTORE] ❌ Problem solutions load failed:', err);
+    console.error("[FIRESTORE] \u274C Problem solutions load failed:", err);
   }
   return null;
 }
-
-// --- SECURITY HARDENING MIDDLEWARE ---
-
-// 1. Security Headers
 app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('X-XSS-Protection', '0');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  res.setHeader('Content-Security-Policy', "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval';");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("X-XSS-Protection", "0");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  res.setHeader("Content-Security-Policy", "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval';");
   next();
 });
-
-// 2. Simple In-Memory Rate Limiter for Sensitive/Auth/Submission Endpoints
-function createRateLimiter(windowMs: number, maxRequests: number, message: string) {
-  const limiterMap = new Map<string, { count: number; resetTime: number }>();
-  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    // Skip rate limiting in local test runs if TEST_MODE is active
-    if (process.env.TEST_MODE === 'true') return next();
-
-    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+function createRateLimiter(windowMs, maxRequests, message) {
+  const limiterMap = /* @__PURE__ */ new Map();
+  return (req, res, next) => {
+    if (process.env.TEST_MODE === "true") return next();
+    const ip = req.ip || req.socket.remoteAddress || "unknown";
     const now = Date.now();
     let record = limiterMap.get(ip);
-
     if (!record || now > record.resetTime) {
       record = { count: 1, resetTime: now + windowMs };
       limiterMap.set(ip, record);
       return next();
     }
-
     record.count++;
     if (record.count > maxRequests) {
       return res.status(429).json({
         success: false,
-        message: message || 'Too many requests, please try again later.',
-        retryAfter: Math.ceil((record.resetTime - now) / 1000)
+        message: message || "Too many requests, please try again later.",
+        retryAfter: Math.ceil((record.resetTime - now) / 1e3)
       });
     }
     next();
   };
 }
-
-const authRateLimiter = createRateLimiter(15 * 60 * 1000, 15, 'Too many authentication attempts. Please try again later.');
-const uploadRateLimiter = createRateLimiter(60 * 1000, 20, 'Upload rate limit exceeded. Please slow down.');
-const publicApiRateLimiter = createRateLimiter(60 * 1000, 60, 'Too many requests. Please try again shortly.');
-
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-const UPLOADS_DIR = IS_VERCEL
-  ? path.join('/tmp', 'techfix_uploads')
-  : path.join(process.cwd(), 'public', 'uploads');
-
-// Shared Database Reference (declared early to prevent TDZ)
-let db: any = null;
-
-// Dynamic Getters for Resend Credentials & Notification Destination (allows dynamic Admin Panel updates)
-export function getNotificationDestination(): string {
-  return (
-    process.env.TARGET_EMAIL || process.env.ADMIN_EMAIL || db?.settings?.resendTargetEmail ||
-    db?.settings?.email ||
-    process.env.NOTIFICATION_TARGET_EMAIL ||
-    process.env.NOTIFICATION_EMAIL ||
-    "techfixpeshawar@gmail.com"
-  );
+var authRateLimiter = createRateLimiter(15 * 60 * 1e3, 15, "Too many authentication attempts. Please try again later.");
+var uploadRateLimiter = createRateLimiter(60 * 1e3, 20, "Upload rate limit exceeded. Please slow down.");
+var publicApiRateLimiter = createRateLimiter(60 * 1e3, 60, "Too many requests. Please try again shortly.");
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+var UPLOADS_DIR = IS_VERCEL ? path.join("/tmp", "techfix_uploads") : path.join(process.cwd(), "public", "uploads");
+var db = null;
+function getNotificationDestination() {
+  return process.env.TARGET_EMAIL || process.env.ADMIN_EMAIL || db?.settings?.resendTargetEmail || db?.settings?.email || process.env.NOTIFICATION_TARGET_EMAIL || process.env.NOTIFICATION_EMAIL || "techfixpeshawar@gmail.com";
 }
-
-export function getTechnicianPhone(): string {
-  return (db?.settings as any)?.phoneNumber || process.env.BUSINESS_PHONE || "0327 5526107";
+function getTechnicianPhone() {
+  return db?.settings?.phoneNumber || process.env.BUSINESS_PHONE || "0327 5526107";
 }
-
-export function getTechnicianWhatsApp(): string {
-  const raw = (db?.settings as any)?.whatsappNumber || process.env.BUSINESS_WHATSAPP || "923275526107";
-  return raw.replace(/[^0-9]/g, '');
+function getTechnicianWhatsApp() {
+  const raw = db?.settings?.whatsappNumber || process.env.BUSINESS_WHATSAPP || "923275526107";
+  return raw.replace(/[^0-9]/g, "");
 }
-
-export function getResendApiKey(): string {
-  return (
-    process.env.RESEND_API_KEY ||
-    db?.settings?.resendApiKey ||
-    ""
-  );
+function getResendApiKey() {
+  return process.env.RESEND_API_KEY || db?.settings?.resendApiKey || "";
 }
-
-export function getResendFromEmail(): string {
-  return (
-    db?.settings?.resendFromEmail ||
-    process.env.FROM_EMAIL || process.env.RESEND_FROM ||
-    "Peshawar Tech Support <onboarding@resend.dev>"
-  );
+function getResendFromEmail() {
+  return db?.settings?.resendFromEmail || process.env.FROM_EMAIL || process.env.RESEND_FROM || "Peshawar Tech Support <onboarding@resend.dev>";
 }
-
-export let NOTIFICATION_DESTINATION = "techfixpeshawar@gmail.com";
-
-// Branded HTML Email Generator
+var NOTIFICATION_DESTINATION = "techfixpeshawar@gmail.com";
 function generateBrandedEmailHtml({
   clientName,
   fullName,
@@ -448,32 +667,16 @@ function generateBrandedEmailHtml({
   message,
   area,
   urgency
-}: {
-  clientName?: string;
-  fullName?: string;
-  title?: string;
-  badge?: string;
-  email?: string;
-  phone: string;
-  whatsapp?: string;
-  subject?: string;
-  service?: string;
-  budget?: string;
-  message: string;
-  area?: string;
-  urgency?: string;
-  [key: string]: any;
 }) {
-  const effectiveClientName = clientName || fullName || 'Valued Customer';
-  const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
-  const waNumber = (whatsapp || cleanPhone).startsWith('0')
-    ? '92' + (whatsapp || cleanPhone).slice(1)
-    : (whatsapp || cleanPhone).startsWith('+')
-    ? (whatsapp || cleanPhone).slice(1)
-    : (whatsapp || cleanPhone);
-  const waReplyLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(`Hello ${clientName}, this is Safiullah from TechFix Peshawar following up on your inquiry about ${subject || service || 'computer service'}.`)}`;
-  const mailtoLink = email ? `mailto:${email}?subject=${encodeURIComponent(`Re: ${subject || service || 'Computer Service Inquiry - TechFix Peshawar'}`)}&body=${encodeURIComponent(`Hello ${clientName},\n\nThank you for contacting TechFix Peshawar regarding your request.\n\n`)}` : '';
+  const effectiveClientName = clientName || fullName || "Valued Customer";
+  const cleanPhone = (phone || "").replace(/[^0-9]/g, "");
+  const waNumber = (whatsapp || cleanPhone).startsWith("0") ? "92" + (whatsapp || cleanPhone).slice(1) : (whatsapp || cleanPhone).startsWith("+") ? (whatsapp || cleanPhone).slice(1) : whatsapp || cleanPhone;
+  const waReplyLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(`Hello ${clientName}, this is Safiullah from TechFix Peshawar following up on your inquiry about ${subject || service || "computer service"}.`)}`;
+  const mailtoLink = email ? `mailto:${email}?subject=${encodeURIComponent(`Re: ${subject || service || "Computer Service Inquiry - TechFix Peshawar"}`)}&body=${encodeURIComponent(`Hello ${clientName},
 
+Thank you for contacting TechFix Peshawar regarding your request.
+
+`)}` : "";
   return `
   <!DOCTYPE html>
   <html>
@@ -488,13 +691,13 @@ function generateBrandedEmailHtml({
       <!-- Brand Header Badge -->
       <div style="background: linear-gradient(135deg, #0284c7, #0f766e); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
         <span style="display:inline-block; background-color:rgba(15, 23, 42, 0.6); color:#38bdf8; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:4px 12px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(56, 189, 248, 0.4);">
-          ⚡ TECHFIX PESHAWAR • NEW INQUIRY ALERT
+          \u26A1 TECHFIX PESHAWAR \u2022 NEW INQUIRY ALERT
         </span>
         <h1 style="margin:0; font-size:22px; font-weight:800; color:#ffffff; letter-spacing:-0.5px;">
           Customer Lead & Contact Inquiry
         </h1>
         <p style="margin:6px 0 0 0; font-size:13px; color:#cbd5e1;">
-          Direct On-Site Support • Peshawar, Khyber Pakhtunkhwa
+          Direct On-Site Support \u2022 Peshawar, Khyber Pakhtunkhwa
         </p>
       </div>
 
@@ -507,7 +710,7 @@ function generateBrandedEmailHtml({
             Subject / Service Requested
           </div>
           <div style="font-size:17px; font-weight:bold; color:#38bdf8;">
-            ${subject || service || 'General Computer Repair / Service Query'}
+            ${subject || service || "General Computer Repair / Service Query"}
           </div>
         </div>
 
@@ -533,15 +736,15 @@ function generateBrandedEmailHtml({
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
               <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Subject / Service:</td>
-              <td style="padding:10px 0; color:#f1f5f9; font-weight:600;">${subject || service || 'Computer Diagnostics & Support'}</td>
+              <td style="padding:10px 0; color:#f1f5f9; font-weight:600;">${subject || service || "Computer Diagnostics & Support"}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
               <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Budget / Quote:</td>
-              <td style="padding:10px 0; color:#fbbf24; font-weight:bold;">${budget || 'Pending On-Site Inspection (From Rs. 500)'}</td>
+              <td style="padding:10px 0; color:#fbbf24; font-weight:bold;">${budget || "Pending On-Site Inspection (From Rs. 500)"}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
               <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Location / Area:</td>
-              <td style="padding:10px 0; color:#f1f5f9;">${area || 'Peshawar'}</td>
+              <td style="padding:10px 0; color:#f1f5f9;">${area || "Peshawar"}</td>
             </tr>
             <tr>
               <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Submitted Time:</td>
@@ -562,11 +765,11 @@ function generateBrandedEmailHtml({
         <div style="text-align:center; padding:10px 0 10px 0;">
           ${email ? `
             <a href="${mailtoLink}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
-              ✉️ Reply Directly to Client
+              \u2709\uFE0F Reply Directly to Client
             </a>
-          ` : ''}
+          ` : ""}
           <a href="${waReplyLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
-            💬 Chat on WhatsApp
+            \u{1F4AC} Chat on WhatsApp
           </a>
         </div>
 
@@ -579,8 +782,6 @@ function generateBrandedEmailHtml({
   </html>
   `;
 }
-
-// Plain-Text Email Fallback
 function generateBrandedEmailText({
   clientName,
   email,
@@ -590,41 +791,35 @@ function generateBrandedEmailText({
   budget,
   message,
   area
-}: any) {
+}) {
   return `
 ========================================
-⚡ TECHFIX PESHAWAR - NEW LEAD INQUIRY
+\u26A1 TECHFIX PESHAWAR - NEW LEAD INQUIRY
 ========================================
 
 Client Name:    ${clientName}
-Email:          ${email || 'Not provided'}
+Email:          ${email || "Not provided"}
 Phone/WhatsApp: ${phone}
-Area/Location:  ${area || 'Peshawar'}
-Subject:        ${subject || service || 'Computer Repair Inquiry'}
-Budget:         ${budget || 'Pending Inspection'}
+Area/Location:  ${area || "Peshawar"}
+Subject:        ${subject || service || "Computer Repair Inquiry"}
+Budget:         ${budget || "Pending Inspection"}
 Submitted At:   ${getPeshawarDateTimeString()} (PKT, UTC+5)
 
 MESSAGE / DETAILS:
 ${message}
 
-Reply via Email:    mailto:${email || ''}
-WhatsApp Direct:    https://wa.me/${(phone || '').replace(/[^0-9]/g, '')}
+Reply via Email:    mailto:${email || ""}
+WhatsApp Direct:    https://wa.me/${(phone || "").replace(/[^0-9]/g, "")}
 ========================================
   `.trim();
 }
-
-// Appointment Confirmation Email for Customer
 function generateAppointmentConfirmedEmailHtml({
   booking,
   scheduledTime
-}: {
-  booking: any;
-  scheduledTime: string;
 }) {
   const techWa = getTechnicianWhatsApp();
   const techPhone = getTechnicianPhone();
   const waTechLink = `https://wa.me/${techWa}?text=${encodeURIComponent(`Hello Safiullah! I received my appointment confirmation (#${booking.id}) for ${scheduledTime}.`)}`;
-
   return `
   <!DOCTYPE html>
   <html>
@@ -639,13 +834,13 @@ function generateAppointmentConfirmedEmailHtml({
       <!-- Brand Header -->
       <div style="background: linear-gradient(135deg, #059669, #0284c7); padding: 28px 24px; text-align: center; border-bottom: 2px solid #10b981;">
         <span style="display:inline-block; background-color:rgba(15, 23, 42, 0.7); color:#34d399; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:5px 14px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(52, 211, 153, 0.4);">
-          ✓ APPOINTMENT SCHEDULED & CONFIRMED
+          \u2713 APPOINTMENT SCHEDULED & CONFIRMED
         </span>
         <h1 style="margin:0; font-size:22px; font-weight:800; color:#ffffff; letter-spacing:-0.5px;">
-          TechFix Peshawar • On-Site Service Confirmed
+          TechFix Peshawar \u2022 On-Site Service Confirmed
         </h1>
         <p style="margin:6px 0 0 0; font-size:13px; color:#e0e7ff;">
-          Computer Science & Hardware Specialist • Direct Doorstep Support
+          Computer Science & Hardware Specialist \u2022 Direct Doorstep Support
         </p>
       </div>
 
@@ -664,7 +859,7 @@ function generateAppointmentConfirmedEmailHtml({
             Your scheduled appointment is confirmed! Our technician will arrive at:
           </div>
           <div style="font-size: 20px; font-weight: 800; color: #38bdf8; margin-top: 8px; font-family: monospace;">
-            📅 ${scheduledTime}
+            \u{1F4C5} ${scheduledTime}
           </div>
           <div style="font-size: 13px; color: #94a3b8; margin-top: 6px;">
             Service Area: <strong style="color: #f1f5f9;">${booking.area} (Peshawar)</strong>
@@ -707,7 +902,7 @@ function generateAppointmentConfirmedEmailHtml({
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
               <td style="padding:10px 0; color:#94a3b8;">Device & Model:</td>
-              <td style="padding:10px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `— ${booking.computerBrandModel}` : ''}</td>
+              <td style="padding:10px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `\u2014 ${booking.computerBrandModel}` : ""}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
               <td style="padding:10px 0; color:#94a3b8;">Preferred Schedule:</td>
@@ -719,11 +914,11 @@ function generateAppointmentConfirmedEmailHtml({
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
               <td style="padding:10px 0; color:#94a3b8;">Urgency:</td>
-              <td style="padding:10px 0; color:${booking.urgency === 'Urgent' ? '#f87171' : '#f8fafc'}; font-weight:bold;">${(booking.urgency || 'NORMAL').toUpperCase()}</td>
+              <td style="padding:10px 0; color:${booking.urgency === "Urgent" ? "#f87171" : "#f8fafc"}; font-weight:bold;">${(booking.urgency || "NORMAL").toUpperCase()}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
               <td style="padding:10px 0; color:#94a3b8;">Important Data:</td>
-              <td style="padding:10px 0; color:#f8fafc;">${booking.containsImportantData || 'NO'}</td>
+              <td style="padding:10px 0; color:#f8fafc;">${booking.containsImportantData || "NO"}</td>
             </tr>
             <tr>
               <td style="padding:10px 0; color:#94a3b8;">Submitted Time:</td>
@@ -743,10 +938,10 @@ function generateAppointmentConfirmedEmailHtml({
         <!-- Direct Reply / Action Buttons -->
         <div style="text-align:center; padding:10px 0;">
           <a href="${waTechLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
-            💬 Reply on WhatsApp
+            \u{1F4AC} Reply on WhatsApp
           </a>
-          <a href="tel:${techPhone.replace(/\s+/g, '')}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
-            📞 Call Technician (${techPhone})
+          <a href="tel:${techPhone.replace(/\s+/g, "")}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
+            \u{1F4DE} Call Technician (${techPhone})
           </a>
         </div>
 
@@ -759,19 +954,13 @@ function generateAppointmentConfirmedEmailHtml({
   </html>
   `;
 }
-
-// Technician Contact Notification Email for Customer
 function generateTechnicianContactEmailHtml({
   booking,
   technicianNote
-}: {
-  booking: any;
-  technicianNote?: string;
 }) {
   const techWa = getTechnicianWhatsApp();
   const techPhone = getTechnicianPhone();
   const waTechLink = `https://wa.me/${techWa}?text=${encodeURIComponent(`Hello Safiullah! I received your message regarding my service request (#${booking.id}).`)}`;
-
   return `
   <!DOCTYPE html>
   <html>
@@ -786,10 +975,10 @@ function generateTechnicianContactEmailHtml({
       <!-- Header -->
       <div style="background: linear-gradient(135deg, #2563eb, #0284c7); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
         <span style="display:inline-block; background-color:rgba(15, 23, 42, 0.7); color:#38bdf8; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:5px 14px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(56, 189, 248, 0.4);">
-          ⚡ TECHNICIAN UPDATE • CONTACT INITIATED
+          \u26A1 TECHNICIAN UPDATE \u2022 CONTACT INITIATED
         </span>
         <h1 style="margin:0; font-size:22px; font-weight:800; color:#ffffff; letter-spacing:-0.5px;">
-          TechFix Peshawar • Service Update
+          TechFix Peshawar \u2022 Service Update
         </h1>
         <p style="margin:6px 0 0 0; font-size:13px; color:#bae6fd;">
           Direct Follow-up on Your Computer Service Request
@@ -822,7 +1011,7 @@ function generateTechnicianContactEmailHtml({
             "${technicianNote}"
           </div>
         </div>
-        ` : ''}
+        ` : ""}
 
         <!-- Booking Details -->
         <div style="background-color:#0b1120; border-radius:10px; padding:16px; margin-bottom:24px; border:1px solid #1e293b;">
@@ -838,7 +1027,7 @@ function generateTechnicianContactEmailHtml({
               </tr>
               <tr>
                 <td style="padding:6px 0; color:#94a3b8;">Device:</td>
-                <td style="padding:6px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `— ${booking.computerBrandModel}` : ''}</td>
+                <td style="padding:6px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `\u2014 ${booking.computerBrandModel}` : ""}</td>
               </tr>
               <tr>
                 <td style="padding:6px 0; color:#94a3b8;">Location:</td>
@@ -851,10 +1040,10 @@ function generateTechnicianContactEmailHtml({
         <!-- Direct CTA Buttons -->
         <div style="text-align:center; padding:10px 0;">
           <a href="${waTechLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
-            💬 Chat on WhatsApp
+            \u{1F4AC} Chat on WhatsApp
           </a>
-          <a href="tel:${techPhone.replace(/\s+/g, '')}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
-            📞 Call Technician (${techPhone})
+          <a href="tel:${techPhone.replace(/\s+/g, "")}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
+            \u{1F4DE} Call Technician (${techPhone})
           </a>
         </div>
 
@@ -867,32 +1056,7 @@ function generateTechnicianContactEmailHtml({
   </html>
   `;
 }
-
-// Multi-Provider Email Notification Waterfall (True Bidirectional Auto-Failover via unified emailService)
-export async function sendNotificationEmail(options: {
-  to?: string;
-  from?: string;
-  apiKey?: string;
-  preferredProvider?: 'resend' | 'gmail_smtp' | 'auto';
-  gmailUser?: string;
-  gmailAppPassword?: string;
-  subject: string;
-  html?: string;
-  text?: string;
-  lead?: any;
-  leadType?: string;
-  leadName?: string;
-  [key: string]: any;
-}): Promise<{
-  success: boolean;
-  status: 'sent' | 'failed';
-  provider: 'resend' | 'smtp' | 'logged';
-  sentTo: string;
-  sentAt: string;
-  messageId?: string;
-  error?: string;
-  failoverNote?: string;
-}> {
+async function sendNotificationEmail(options) {
   const result = await sendEmail({
     to: options.to,
     subject: options.subject,
@@ -901,13 +1065,12 @@ export async function sendNotificationEmail(options: {
     preferredProvider: options.preferredProvider,
     customResendKey: options.apiKey,
     customGmailUser: options.gmailUser,
-    customGmailPass: options.gmailAppPassword,
+    customGmailPass: options.gmailAppPassword
   });
-
   return {
     success: result.success,
-    status: result.success ? 'sent' : 'failed',
-    provider: (result.provider === 'smtp' || result.provider === 'resend' ? result.provider : 'logged'),
+    status: result.success ? "sent" : "failed",
+    provider: result.provider === "smtp" || result.provider === "resend" ? result.provider : "logged",
     sentTo: result.sentTo,
     sentAt: result.sentAt,
     messageId: result.messageId,
@@ -915,32 +1078,23 @@ export async function sendNotificationEmail(options: {
     failoverNote: result.failoverNote
   };
 }
-
-// Backward compatibility alias for booking alerts
-async function dispatchEmail(options: {
-  to?: string;
-  subject: string;
-  html?: string;
-  text: string;
-}) {
+async function dispatchEmail(options) {
   const result = await sendEmail({
     to: options.to,
     subject: options.subject,
     html: options.html,
-    text: options.text,
+    text: options.text
   });
   return {
     success: result.success,
     delivered: result.success,
     provider: result.provider,
-    status: result.success ? 'sent' : 'failed',
+    status: result.success ? "sent" : "failed",
     messageId: result.messageId,
     recipient: result.sentTo,
     error: result.error
   };
 }
-
-// Helper for atomic file persistence
 function ensureDbDirectory() {
   try {
     const dir = path.dirname(DB_FILE);
@@ -951,17 +1105,15 @@ function ensureDbDirectory() {
       fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     }
   } catch (err) {
-    // Read-only filesystem guard on serverless platforms (e.g. Vercel)
   }
 }
-
-const defaultData = {
+var defaultData = {
   settings: {
     whatsappNumber: "923275526107",
     phoneNumber: "+92 327 5526107",
     email: "techfixpeshawar@gmail.com",
     serviceCity: "Peshawar, Khyber Pakhtunkhwa, Pakistan",
-    businessHours: "Monday – Saturday: 9:00 AM – 8:30 PM (Urgent On-Site Visits Available)",
+    businessHours: "Monday \u2013 Saturday: 9:00 AM \u2013 8:30 PM (Urgent On-Site Visits Available)",
     visitFeeStarting: "From Rs. 500",
     bulkQuoteNote: "Custom discounted tier for 5+ PCs with deployment script & hardware imaging",
     technicianName: "Safiullah",
@@ -984,7 +1136,7 @@ const defaultData = {
       fullDesc: "I install and configure genuine Windows on compatible laptops and desktop computers. Every setup includes partition preparation, correct manufacturer drivers, critical security patches, and full hardware verification.",
       priceStarting: "From Rs. 1,500",
       priceNote: "Depends on SSD/HDD, hardware condition, and required data transfer",
-      turnaround: "45 – 90 mins (depends on SSD/USB/Hardware)",
+      turnaround: "45 \u2013 90 mins (depends on SSD/USB/Hardware)",
       icon: "Monitor",
       status: "active",
       order: 1,
@@ -1000,12 +1152,12 @@ const defaultData = {
     {
       id: "srv-os-migration",
       key: "os-migration",
-      title: "Make Your Old Computer Feel Faster (HDD → SSD)",
+      title: "Make Your Old Computer Feel Faster (HDD \u2192 SSD)",
       shortDesc: "Breathe new life into sluggish laptops and PCs by upgrading to high-speed solid-state storage.",
       fullDesc: "Many older computers use traditional hard disk drives (HDDs) that bottleneck every click. Upgrading your system drive to an SSD provides dramatic responsiveness improvements. When appropriate, I migrate your entire existing Windows installation to the SSD without starting from zero.",
       priceStarting: "From Rs. 2,000",
       priceNote: "Excludes SSD cost or customer-supplied SSD; includes cloning/migration & optimization",
-      turnaround: "1 – 2 hours",
+      turnaround: "1 \u2013 2 hours",
       icon: "HardDrive",
       status: "active",
       order: 2,
@@ -1046,7 +1198,7 @@ const defaultData = {
       fullDesc: "A Blue Screen of Death is a symptom, not a mystery that always requires reformatting. We analyze minidump logs, test RAM sticks for bit-flip faults, check SSD health, and monitor thermals to fix the root cause permanently.",
       priceStarting: "From Rs. 1,500",
       priceNote: "Includes crash dump analysis, RAM stress test, and thermal check",
-      turnaround: "45 – 75 mins",
+      turnaround: "45 \u2013 75 mins",
       icon: "Cpu",
       status: "active",
       order: 4,
@@ -1067,7 +1219,7 @@ const defaultData = {
       fullDesc: "Repair first when appropriate; reinstall only when strictly necessary. We fix broken Boot Configuration Data (BCD), repair corrupted system files with DISM/SFC, and resolve update rollback loops.",
       priceStarting: "From Rs. 1,500",
       priceNote: "Priority on preserving customer applications and desktop data",
-      turnaround: "40 – 60 mins",
+      turnaround: "40 \u2013 60 mins",
       icon: "Wrench",
       status: "active",
       order: 5,
@@ -1087,7 +1239,7 @@ const defaultData = {
       fullDesc: "Why is your computer crawling? We inspect hardware bottlenecks, analyze storage read/write performance, eliminate background resource hogs, check for stealth malware, and clean out dust/thermal barriers.",
       priceStarting: "From Rs. 1,200",
       priceNote: "Transparent diagnosis: if an SSD is needed, we inform you honestly",
-      turnaround: "45 – 60 mins",
+      turnaround: "45 \u2013 60 mins",
       icon: "Gauge",
       status: "active",
       order: 6,
@@ -1108,7 +1260,7 @@ const defaultData = {
       fullDesc: "Setup your computer right. We install official manufacturer device drivers, configure network or USB printers, configure secure browsers, PDF tools, and legitimate customer software. Strictly no pirated or cracked software.",
       priceStarting: "From Rs. 1,000",
       priceNote: "Per machine or bundled with Windows installation",
-      turnaround: "30 – 45 mins",
+      turnaround: "30 \u2013 45 mins",
       icon: "Layers",
       status: "active",
       order: 7
@@ -1121,7 +1273,7 @@ const defaultData = {
       fullDesc: "Locked out of your authorized device? We provide authorized troubleshooting for forgotten local Windows accounts, PIN corruption, and assist with official Microsoft Account / BitLocker recovery portal access. Customer proof of ownership required.",
       priceStarting: "From Rs. 1,500",
       priceNote: "Verification of authorization required. Encrypted drives require your recovery key.",
-      turnaround: "30 – 45 mins",
+      turnaround: "30 \u2013 45 mins",
       icon: "KeyRound",
       status: "active",
       order: 8
@@ -1235,12 +1387,12 @@ const defaultData = {
     heroHeadline: "Professional On-Site Computer Support in Peshawar",
     heroSubheadline: "Don't disconnect cables and waste hours in traffic. We come to your home or office with diagnostic tools, Windows setup media, SSD upgrades, and honest solutions.",
     announcementActive: true,
-    announcementText: "⚡ Urgent same-day on-site computer diagnostics available across University Town, Hayatabad, Cantt & Saddar.",
+    announcementText: "\u26A1 Urgent same-day on-site computer diagnostics available across University Town, Hayatabad, Cantt & Saddar.",
     ctaButtonText: "Book On-Site Service",
     metaTitle: "Peshawar On-Site Computer Support | Windows & PC Troubleshooting",
     metaDescription: "Professional on-site computer support, Windows setup, SSD upgrades, BSOD troubleshooting, and data recovery assistance delivered at your home or office in Peshawar.",
     metaKeywords: "computer repair peshawar, windows installation peshawar, ssd upgrade, on-site pc technician hayatabad, university town",
-    footerBio: "Independent on-site technical assistance by Safiullah — Computer Science & Cybersecurity practitioner in Peshawar.",
+    footerBio: "Independent on-site technical assistance by Safiullah \u2014 Computer Science & Cybersecurity practitioner in Peshawar.",
     disclaimerText: "Windows is a registered trademark of Microsoft Corporation. We operate as an independent on-site computer support provider in Peshawar."
   },
   categories: [
@@ -1355,21 +1507,21 @@ const defaultData = {
       id: "log-1",
       action: "System Initialized",
       details: "Admin CMS loaded with official Peshawar on-site service catalog",
-      timestamp: new Date().toISOString(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     },
     {
       id: "log-2",
       action: "Booking Confirmed",
       details: "Confirmed on-site visit for Professor Khalid at Agriculture University (Today 2:30 PM)",
-      timestamp: new Date(Date.now() - 3600000).toISOString(),
+      timestamp: new Date(Date.now() - 36e5).toISOString(),
       user: "Safiullah (Admin)"
     },
     {
       id: "log-3",
       action: "Price Updated",
       details: "Verified standard transparent starting price Rs. 1,500 for Clean Windows Setup",
-      timestamp: new Date(Date.now() - 7200000).toISOString(),
+      timestamp: new Date(Date.now() - 72e5).toISOString(),
       user: "Safiullah (Admin)"
     }
   ],
@@ -1377,7 +1529,7 @@ const defaultData = {
     // 4 NEW Requests
     {
       id: "PSH-NEW-101",
-      createdAt: new Date().toISOString(),
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       fullName: "Saad Khan",
       phone: "0313 4567891",
       whatsapp: "0313 4567891",
@@ -1386,7 +1538,7 @@ const defaultData = {
       computerBrandModel: "Dell XPS 15 (9500)",
       serviceRequired: "Blue Screen / BSOD Real Cause Diagnosis",
       problemDescription: "Getting random blue screen crashes with error IRQL_NOT_LESS_OR_EQUAL whenever I launch Chrome or Adobe Premiere. Need urgent help before exam submission.",
-      preferredDate: new Date().toISOString().split('T')[0],
+      preferredDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
       preferredTime: "Morning (10 AM - 1 PM)",
       urgency: "Urgent",
       containsImportantData: "YES",
@@ -1395,16 +1547,16 @@ const defaultData = {
     },
     {
       id: "PSH-NEW-102",
-      createdAt: new Date(Date.now() - 1800000).toISOString(),
+      createdAt: new Date(Date.now() - 18e5).toISOString(),
       fullName: "Dr. Tariq Mahmood",
       phone: "0333 9123456",
       whatsapp: "0333 9123456",
       area: "Hayatabad (Phase 4)",
       deviceType: "Desktop",
       computerBrandModel: "HP Pavilion Desktop Core i5",
-      serviceRequired: "Make Your Old Computer Feel Faster (HDD → SSD)",
+      serviceRequired: "Make Your Old Computer Feel Faster (HDD \u2192 SSD)",
       problemDescription: "Desktop computer is terribly slow since last month. Takes almost 5 minutes to boot. Want to upgrade to SSD and keep all patient clinic management files intact without reinstalling.",
-      preferredDate: new Date().toISOString().split('T')[0],
+      preferredDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
       preferredTime: "Afternoon (1 PM - 5 PM)",
       urgency: "Normal",
       containsImportantData: "YES",
@@ -1413,7 +1565,7 @@ const defaultData = {
     },
     {
       id: "PSH-NEW-103",
-      createdAt: new Date(Date.now() - 3600000).toISOString(),
+      createdAt: new Date(Date.now() - 36e5).toISOString(),
       fullName: "Ayesha Rehman",
       phone: "0321 8765432",
       whatsapp: "0321 8765432",
@@ -1422,7 +1574,7 @@ const defaultData = {
       computerBrandModel: "Lenovo ThinkPad T480",
       serviceRequired: "Fast Windows Installation & Setup",
       problemDescription: "Recently purchased used laptop from market. Want clean genuine Windows 11 installation with all official Lenovo Vantage drivers, Wi-Fi drivers, and browser setup.",
-      preferredDate: new Date().toISOString().split('T')[0],
+      preferredDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
       preferredTime: "Evening (5 PM - 8 PM)",
       urgency: "Normal",
       containsImportantData: "NO",
@@ -1431,7 +1583,7 @@ const defaultData = {
     },
     {
       id: "PSH-NEW-104",
-      createdAt: new Date(Date.now() - 5400000).toISOString(),
+      createdAt: new Date(Date.now() - 54e5).toISOString(),
       fullName: "Irfan Ullah",
       phone: "0300 5544332",
       whatsapp: "0300 5544332",
@@ -1440,18 +1592,17 @@ const defaultData = {
       computerBrandModel: "Asus TUF Gaming FX505",
       serviceRequired: "Windows Startup & Boot Repair",
       problemDescription: "Laptop turned off during Windows update and now displays 'Preparing Automatic Repair' and black screen. Do not want to format my college assignments.",
-      preferredDate: new Date().toISOString().split('T')[0],
+      preferredDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
       preferredTime: "Morning (10 AM - 1 PM)",
       urgency: "Urgent",
       containsImportantData: "YES",
       status: "NEW",
       adminNotes: "Bootloader / EFI repair candidate. Data preserved."
     },
-
     // 2 PENDING Bookings (Contacted, awaiting time confirmation)
     {
       id: "PSH-PND-201",
-      createdAt: new Date(Date.now() - 86400000).toISOString(),
+      createdAt: new Date(Date.now() - 864e5).toISOString(),
       fullName: "Engr. Bilal Shinwari",
       phone: "0345 9988776",
       whatsapp: "0345 9988776",
@@ -1460,7 +1611,7 @@ const defaultData = {
       computerBrandModel: "Lenovo Legion 5 AMD Ryzen 7",
       serviceRequired: "Slow Computer & Thermal Overhaul",
       problemDescription: "Fans running at maximum speed loudly. Laptop gets burning hot when running AutoCAD. Likely needs heatsink dust cleaning and fresh thermal paste application.",
-      preferredDate: new Date(Date.now() + 86400000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() + 864e5).toISOString().split("T")[0],
       preferredTime: "Morning (10 AM - 1 PM)",
       urgency: "Normal",
       containsImportantData: "NO",
@@ -1469,7 +1620,7 @@ const defaultData = {
     },
     {
       id: "PSH-PND-202",
-      createdAt: new Date(Date.now() - 90000000).toISOString(),
+      createdAt: new Date(Date.now() - 9e7).toISOString(),
       fullName: "Farooq Shah",
       phone: "0312 3344556",
       whatsapp: "0312 3344556",
@@ -1478,18 +1629,17 @@ const defaultData = {
       computerBrandModel: "Custom Core i7 Tower",
       serviceRequired: "Data Recovery Assistance",
       problemDescription: "Accidentally formatted partition D: while trying to create a USB installer. Have not written anything to the drive since. Need recovery assessment.",
-      preferredDate: new Date(Date.now() + 86400000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() + 864e5).toISOString().split("T")[0],
       preferredTime: "Afternoon (1 PM - 5 PM)",
       urgency: "Urgent",
       containsImportantData: "YES",
       status: "CONTACTED",
       adminNotes: "Instructed customer to leave PC completely powered off until technician visit."
     },
-
     // 3 CONFIRMED Visits (Scheduled on-site visits)
     {
       id: "PSH-CNF-301",
-      createdAt: new Date(Date.now() - 43200000).toISOString(),
+      createdAt: new Date(Date.now() - 432e5).toISOString(),
       fullName: "Professor Khalid",
       phone: "0301 2233445",
       whatsapp: "0301 2233445",
@@ -1498,7 +1648,7 @@ const defaultData = {
       computerBrandModel: "HP EliteBook 840 G6",
       serviceRequired: "Fast Windows Installation & Setup",
       problemDescription: "Need clean genuine Windows 10 installation with all academic research software and network printer configured.",
-      preferredDate: new Date().toISOString().split('T')[0],
+      preferredDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
       preferredTime: "Afternoon (1 PM - 5 PM)",
       scheduledTime: "Today at 2:30 PM",
       urgency: "Normal",
@@ -1508,7 +1658,7 @@ const defaultData = {
     },
     {
       id: "PSH-CNF-302",
-      createdAt: new Date(Date.now() - 48000000).toISOString(),
+      createdAt: new Date(Date.now() - 48e6).toISOString(),
       fullName: "Naveed Ahmed",
       phone: "0314 6677889",
       whatsapp: "0314 6677889",
@@ -1517,7 +1667,7 @@ const defaultData = {
       computerBrandModel: "Custom Gaming Rig (RTX 3060)",
       serviceRequired: "Blue Screen / BSOD Real Cause Diagnosis",
       problemDescription: "Crashing under GPU load with VIDEO_TDR_FAILURE. Need hardware and driver diagnostics.",
-      preferredDate: new Date().toISOString().split('T')[0],
+      preferredDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
       preferredTime: "Evening (5 PM - 8 PM)",
       scheduledTime: "Today at 5:00 PM",
       urgency: "Normal",
@@ -1527,7 +1677,7 @@ const defaultData = {
     },
     {
       id: "PSH-CNF-303",
-      createdAt: new Date(Date.now() - 52000000).toISOString(),
+      createdAt: new Date(Date.now() - 52e6).toISOString(),
       fullName: "Frontier Computer Academy (Director Tariq)",
       phone: "0334 1122334",
       whatsapp: "0334 1122334",
@@ -1536,7 +1686,7 @@ const defaultData = {
       computerBrandModel: "12x Dell OptiPlex Desktops",
       serviceRequired: "Bulk Windows Deployment (5 to 50+ PCs)",
       problemDescription: "Need all 12 academy student workstations re-imaged with clean Windows 10, student restrictions, and lab software installed.",
-      preferredDate: new Date(Date.now() + 86400000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() + 864e5).toISOString().split("T")[0],
       preferredTime: "Morning (10 AM - 1 PM)",
       scheduledTime: "Tomorrow at 10:00 AM",
       urgency: "Normal",
@@ -1544,20 +1694,19 @@ const defaultData = {
       status: "CONFIRMED",
       adminNotes: "Bulk quote agreed: Rs. 14,000 for 12 systems. Master flash drive prepared."
     },
-
     // 5 COMPLETED Jobs
     {
       id: "PSH-CMP-401",
-      createdAt: new Date(Date.now() - 172800000).toISOString(),
+      createdAt: new Date(Date.now() - 1728e5).toISOString(),
       fullName: "Zubair Khan",
       phone: "0315 9988112",
       whatsapp: "0315 9988112",
       area: "University Town",
       deviceType: "Laptop",
       computerBrandModel: "HP Envy x360",
-      serviceRequired: "Make Your Old Computer Feel Faster (HDD → SSD)",
+      serviceRequired: "Make Your Old Computer Feel Faster (HDD \u2192 SSD)",
       problemDescription: "Upgraded mechanical drive to 512GB NVMe SSD with OS cloning.",
-      preferredDate: new Date(Date.now() - 172800000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() - 1728e5).toISOString().split("T")[0],
       preferredTime: "Morning",
       urgency: "Normal",
       containsImportantData: "YES",
@@ -1566,7 +1715,7 @@ const defaultData = {
     },
     {
       id: "PSH-CMP-402",
-      createdAt: new Date(Date.now() - 259200000).toISOString(),
+      createdAt: new Date(Date.now() - 2592e5).toISOString(),
       fullName: "M. Usman",
       phone: "0322 4455667",
       whatsapp: "0322 4455667",
@@ -1575,7 +1724,7 @@ const defaultData = {
       computerBrandModel: "Dell Optiplex 7050",
       serviceRequired: "Windows Startup & Boot Repair",
       problemDescription: "BCD corruption repaired, offline SFC pass clean.",
-      preferredDate: new Date(Date.now() - 259200000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() - 2592e5).toISOString().split("T")[0],
       preferredTime: "Afternoon",
       urgency: "Urgent",
       containsImportantData: "YES",
@@ -1584,7 +1733,7 @@ const defaultData = {
     },
     {
       id: "PSH-CMP-403",
-      createdAt: new Date(Date.now() - 345600000).toISOString(),
+      createdAt: new Date(Date.now() - 3456e5).toISOString(),
       fullName: "Shahida Parveen",
       phone: "0331 7788990",
       whatsapp: "0331 7788990",
@@ -1593,7 +1742,7 @@ const defaultData = {
       computerBrandModel: "Dell Inspiron 15",
       serviceRequired: "Software, Drivers & Printer Configuration",
       problemDescription: "Removed invasive adware popups, configured HP DeskJet Wi-Fi printer.",
-      preferredDate: new Date(Date.now() - 345600000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() - 3456e5).toISOString().split("T")[0],
       preferredTime: "Evening",
       urgency: "Normal",
       containsImportantData: "NO",
@@ -1602,7 +1751,7 @@ const defaultData = {
     },
     {
       id: "PSH-CMP-404",
-      createdAt: new Date(Date.now() - 432000000).toISOString(),
+      createdAt: new Date(Date.now() - 432e6).toISOString(),
       fullName: "Rashid Minhas",
       phone: "0302 8899001",
       whatsapp: "0302 8899001",
@@ -1611,7 +1760,7 @@ const defaultData = {
       computerBrandModel: "Acer Nitro 5",
       serviceRequired: "Fast Windows Installation & Setup",
       problemDescription: "Fresh Windows 11 installation with official Nvidia drivers & temperature tuning.",
-      preferredDate: new Date(Date.now() - 432000000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() - 432e6).toISOString().split("T")[0],
       preferredTime: "Afternoon",
       urgency: "Normal",
       containsImportantData: "NO",
@@ -1620,7 +1769,7 @@ const defaultData = {
     },
     {
       id: "PSH-CMP-405",
-      createdAt: new Date(Date.now() - 518400000).toISOString(),
+      createdAt: new Date(Date.now() - 5184e5).toISOString(),
       fullName: "Khyber Legal Associates",
       phone: "0346 5566778",
       whatsapp: "0346 5566778",
@@ -1629,7 +1778,7 @@ const defaultData = {
       computerBrandModel: "8x Core i5 Office Workstations",
       serviceRequired: "Bulk Windows Deployment (5 to 50+ PCs)",
       problemDescription: "Standardized Windows 10 deployment with Urdu phonetic keyboard & scanner drivers.",
-      preferredDate: new Date(Date.now() - 518400000).toISOString().split('T')[0],
+      preferredDate: new Date(Date.now() - 5184e5).toISOString().split("T")[0],
       preferredTime: "Full Day",
       urgency: "Normal",
       containsImportantData: "YES",
@@ -1650,10 +1799,10 @@ const defaultData = {
       budget: "Rs. 2,000 - 3,000",
       message: "My Dell Precision workstation reaches 95C and shuts down under CAD load. Need on-site heatsink cleaning, Arctic MX-4 thermal paste reapplication, and fan inspection.",
       status: "NEW",
-      createdAt: new Date(Date.now() - 7200000).toISOString(),
+      createdAt: new Date(Date.now() - 72e5).toISOString(),
       emailNotificationStatus: "sent",
       emailNotificationSentTo: NOTIFICATION_DESTINATION,
-      emailNotificationSentAt: new Date(Date.now() - 7200000).toISOString(),
+      emailNotificationSentAt: new Date(Date.now() - 72e5).toISOString(),
       emailNotificationProvider: "smtp"
     },
     {
@@ -1664,327 +1813,322 @@ const defaultData = {
       whatsapp: "0333 9123456",
       area: "Hayatabad (Phase 2)",
       subject: "NVMe SSD Upgrade with Patient DB Migration",
-      service: "Make Your Old Computer Feel Faster (HDD → SSD)",
+      service: "Make Your Old Computer Feel Faster (HDD \u2192 SSD)",
       budget: "Rs. 2,500",
       message: "Need SSD upgrade for our clinic reception desktop without losing patient records or reinstalling specialized software. Available Wednesday afternoon.",
       status: "CONTACTED",
-      createdAt: new Date(Date.now() - 86400000).toISOString(),
+      createdAt: new Date(Date.now() - 864e5).toISOString(),
       emailNotificationStatus: "sent",
       emailNotificationSentTo: NOTIFICATION_DESTINATION,
-      emailNotificationSentAt: new Date(Date.now() - 86400000).toISOString(),
+      emailNotificationSentAt: new Date(Date.now() - 864e5).toISOString(),
       emailNotificationProvider: "smtp"
     }
   ],
   pageSections: {
     pageStatuses: {
-      services: 'published',
-      'how-it-works': 'published',
-      'why-on-site': 'published',
-      'who-we-serve': 'published',
-      'bulk-windows': 'published',
-      technician: 'published',
-      faq: 'published',
-      contact: 'published'
+      services: "published",
+      "how-it-works": "published",
+      "why-on-site": "published",
+      "who-we-serve": "published",
+      "bulk-windows": "published",
+      technician: "published",
+      faq: "published",
+      contact: "published"
     },
     services: {
-      pageStatus: 'published',
-      badge: 'ON-SITE SERVICES & TRANSPARENT PRICING',
-      title: 'Professional On-Site Computer Support',
-      subtitle: 'Clear, upfront pricing with no hidden charges. Every service includes full on-site diagnosis, live testing, and our standard 14-day warranty.'
+      pageStatus: "published",
+      badge: "ON-SITE SERVICES & TRANSPARENT PRICING",
+      title: "Professional On-Site Computer Support",
+      subtitle: "Clear, upfront pricing with no hidden charges. Every service includes full on-site diagnosis, live testing, and our standard 14-day warranty."
     },
-    'how-it-works': {
-      pageStatus: 'published',
-      badge: 'TRANSPARENT ON-SITE PROTOCOL',
-      title: 'How Our On-Site Service Works',
-      subtitle: 'Simple, honest, and transparent computer assistance delivered right to your home, hostel, or office in Peshawar.',
+    "how-it-works": {
+      pageStatus: "published",
+      badge: "TRANSPARENT ON-SITE PROTOCOL",
+      title: "How Our On-Site Service Works",
+      subtitle: "Simple, honest, and transparent computer assistance delivered right to your home, hostel, or office in Peshawar.",
       steps: [
         {
-          id: 'step-1',
-          num: 'STEP 01',
-          title: 'CONTACT',
-          desc: 'Send a quick WhatsApp message or submit our 60-second online service request.',
-          status: 'published'
+          id: "step-1",
+          num: "STEP 01",
+          title: "CONTACT",
+          desc: "Send a quick WhatsApp message or submit our 60-second online service request.",
+          status: "published"
         },
         {
-          id: 'step-2',
-          num: 'STEP 02',
-          title: 'EXPLAIN',
-          desc: 'Tell me your computer brand/model (Dell, HP, Lenovo, Custom PC) and what issue you are experiencing.',
-          status: 'published'
+          id: "step-2",
+          num: "STEP 02",
+          title: "EXPLAIN",
+          desc: "Tell me your computer brand/model (Dell, HP, Lenovo, Custom PC) and what issue you are experiencing.",
+          status: "published"
         },
         {
-          id: 'step-3',
-          num: 'STEP 03',
-          title: 'BOOK',
-          desc: 'Choose a suitable appointment time (Morning, Afternoon, Evening) for your home or office.',
-          status: 'published'
+          id: "step-3",
+          num: "STEP 03",
+          title: "BOOK",
+          desc: "Choose a suitable appointment time (Morning, Afternoon, Evening) for your home or office.",
+          status: "published"
         },
         {
-          id: 'step-4',
-          num: 'STEP 04',
-          title: 'VISIT & DIAGNOSE',
-          desc: 'I come directly to your location in Peshawar with diagnostic gear, inspect the computer, and resolve the problem.',
-          status: 'published'
+          id: "step-4",
+          num: "STEP 04",
+          title: "VISIT & DIAGNOSE",
+          desc: "I come directly to your location in Peshawar with diagnostic gear, inspect the computer, and resolve the problem.",
+          status: "published"
         }
       ],
       toolkit: [
         {
-          id: 'tool-1',
-          title: 'High-Speed Bootable Diagnostics',
-          desc: 'Multiple Sandisk & Samsung 3.2 Gen 2 USB drives preloaded with official Microsoft Windows 10/11 installation images, WinPE recovery suites, and memory test kernels.',
-          status: 'published'
+          id: "tool-1",
+          title: "High-Speed Bootable Diagnostics",
+          desc: "Multiple Sandisk & Samsung 3.2 Gen 2 USB drives preloaded with official Microsoft Windows 10/11 installation images, WinPE recovery suites, and memory test kernels.",
+          status: "published"
         },
         {
-          id: 'tool-2',
-          title: 'Hardware & Storage Diagnostic Tools',
+          id: "tool-2",
+          title: "Hardware & Storage Diagnostic Tools",
           desc: 'S.M.A.R.T telemetry analyzers, bad-sector detectors, NVMe-to-USB-C enclosure rigs, and 2.5" SATA docking adapters for safe isolated data testing.',
-          status: 'published'
+          status: "published"
         },
         {
-          id: 'tool-3',
-          title: 'Precision Screwdrivers & ESD Gear',
-          desc: 'iFixit precision bit set, anti-static grounding wristband, non-marring prying spudgers, and premium thermal interface compound (Arctic MX-4).',
-          status: 'published'
+          id: "tool-3",
+          title: "Precision Screwdrivers & ESD Gear",
+          desc: "iFixit precision bit set, anti-static grounding wristband, non-marring prying spudgers, and premium thermal interface compound (Arctic MX-4).",
+          status: "published"
         },
         {
-          id: 'tool-4',
-          title: 'Offline Official Driver Cache',
-          desc: 'Pre-downloaded official network, chipset, graphics, and audio drivers for Dell, HP, Lenovo, and Asus laptops to ensure instant offline functionality.',
-          status: 'published'
+          id: "tool-4",
+          title: "Offline Official Driver Cache",
+          desc: "Pre-downloaded official network, chipset, graphics, and audio drivers for Dell, HP, Lenovo, and Asus laptops to ensure instant offline functionality.",
+          status: "published"
         }
       ]
     },
-    'why-on-site': {
-      pageStatus: 'published',
-      badge: 'TRANSPARENCY & PEACE OF MIND',
-      title: 'Why Choose On-Site Service Over a Repair Shop?',
-      subtitle: 'Taking your computer to a crowded repair shop in Saddar or City Bazaar exposes your private data, consumes hours in traffic, and leaves you without your machine for days. On-site computer repair changes that completely.',
+    "why-on-site": {
+      pageStatus: "published",
+      badge: "TRANSPARENCY & PEACE OF MIND",
+      title: "Why Choose On-Site Service Over a Repair Shop?",
+      subtitle: "Taking your computer to a crowded repair shop in Saddar or City Bazaar exposes your private data, consumes hours in traffic, and leaves you without your machine for days. On-site computer repair changes that completely.",
       pillars: [
         {
-          id: 'pillar-1',
-          title: 'Zero Private Data Snooping',
-          desc: 'We never open personal picture galleries, browser history, WhatsApp folders, or financial documents. You sit right beside the computer and observe every diagnostic step.',
-          status: 'published'
+          id: "pillar-1",
+          title: "Zero Private Data Snooping",
+          desc: "We never open personal picture galleries, browser history, WhatsApp folders, or financial documents. You sit right beside the computer and observe every diagnostic step.",
+          status: "published"
         },
         {
-          id: 'pillar-2',
-          title: 'No Risk of Swapped Hardware',
-          desc: 'In bazaar shops, unscrupulous helpers occasionally swap original RAM sticks or SSDs with degraded units. With on-site service, your machine never leaves your room or desk.',
-          status: 'published'
+          id: "pillar-2",
+          title: "No Risk of Swapped Hardware",
+          desc: "In bazaar shops, unscrupulous helpers occasionally swap original RAM sticks or SSDs with degraded units. With on-site service, your machine never leaves your room or desk.",
+          status: "published"
         },
         {
-          id: 'pillar-3',
-          title: 'Zero Transit Shock or Hinge Damage',
-          desc: 'Carrying desktop towers and fragile laptops through Peshawar traffic, potholes, or rain frequently loosens heat sinks, snaps ribbon cables, or cracks screens. On-site prevents all travel damage.',
-          status: 'published'
+          id: "pillar-3",
+          title: "Zero Transit Shock or Hinge Damage",
+          desc: "Carrying desktop towers and fragile laptops through Peshawar traffic, potholes, or rain frequently loosens heat sinks, snaps ribbon cables, or cracks screens. On-site prevents all travel damage.",
+          status: "published"
         },
         {
-          id: 'pillar-4',
-          title: 'Immediate Real-World Testing',
-          desc: 'Test your machine on your exact home or office Wi-Fi, with your specific printer, monitor cables, and sound systems before the technician departs.',
-          status: 'published'
+          id: "pillar-4",
+          title: "Immediate Real-World Testing",
+          desc: "Test your machine on your exact home or office Wi-Fi, with your specific printer, monitor cables, and sound systems before the technician departs.",
+          status: "published"
         }
       ],
       shopSteps: [
-        { id: 'shop-1', step: '01', title: 'PACK COMPUTER', desc: 'Unplug cables, pack heavy tower or delicate laptop into bag', status: 'published' },
-        { id: 'shop-2', step: '02', title: 'TRAVEL', desc: 'Drive through Peshawar traffic, Saddar or Board Bazar congestion', status: 'published' },
-        { id: 'shop-3', step: '03', title: 'WAIT IN SHOP', desc: 'Stand in line waiting for technician to become free', status: 'published' },
-        { id: 'shop-4', step: '04', title: 'EXPLAIN PROBLEM', desc: 'Rush to explain issue to counter clerk, not the technician', status: 'published' },
-        { id: 'shop-5', step: '05', title: 'LEAVE COMPUTER', desc: 'Leave your personal computer, sensitive files, and logins behind for days', status: 'published' },
-        { id: 'shop-6', step: '06', title: 'RETURN LATER', desc: 'Make a second trip back to pick it up, hoping it was actually fixed', status: 'published' }
+        { id: "shop-1", step: "01", title: "PACK COMPUTER", desc: "Unplug cables, pack heavy tower or delicate laptop into bag", status: "published" },
+        { id: "shop-2", step: "02", title: "TRAVEL", desc: "Drive through Peshawar traffic, Saddar or Board Bazar congestion", status: "published" },
+        { id: "shop-3", step: "03", title: "WAIT IN SHOP", desc: "Stand in line waiting for technician to become free", status: "published" },
+        { id: "shop-4", step: "04", title: "EXPLAIN PROBLEM", desc: "Rush to explain issue to counter clerk, not the technician", status: "published" },
+        { id: "shop-5", step: "05", title: "LEAVE COMPUTER", desc: "Leave your personal computer, sensitive files, and logins behind for days", status: "published" },
+        { id: "shop-6", step: "06", title: "RETURN LATER", desc: "Make a second trip back to pick it up, hoping it was actually fixed", status: "published" }
       ],
       ourSteps: [
-        { id: 'our-1', step: '01', title: 'CONTACT ONLINE', desc: 'Reach out on WhatsApp or fill our simple 60-second form', status: 'published' },
-        { id: 'our-2', step: '02', title: 'BOOK A TIME', desc: 'Choose a date and time that fits your exact schedule', status: 'published' },
-        { id: 'our-3', step: '03', title: 'WE COME TO YOU', desc: 'Technician arrives at your home, hostel, or office in Peshawar', status: 'published' },
-        { id: 'our-4', step: '04', title: 'DIAGNOSE IN FRONT OF YOU', desc: 'Full diagnostic performed right before your eyes with no mystery', status: 'published' },
-        { id: 'our-5', step: '05', title: 'SOLVE THE PROBLEM', desc: 'Clean installation, SSD upgrade, or driver repair completed on-site', status: 'published' },
-        { id: 'our-6', step: '06', title: 'TEST & VERIFY', desc: 'Verify everything runs smoothly together before you make payment', status: 'published' }
+        { id: "our-1", step: "01", title: "CONTACT ONLINE", desc: "Reach out on WhatsApp or fill our simple 60-second form", status: "published" },
+        { id: "our-2", step: "02", title: "BOOK A TIME", desc: "Choose a date and time that fits your exact schedule", status: "published" },
+        { id: "our-3", step: "03", title: "WE COME TO YOU", desc: "Technician arrives at your home, hostel, or office in Peshawar", status: "published" },
+        { id: "our-4", step: "04", title: "DIAGNOSE IN FRONT OF YOU", desc: "Full diagnostic performed right before your eyes with no mystery", status: "published" },
+        { id: "our-5", step: "05", title: "SOLVE THE PROBLEM", desc: "Clean installation, SSD upgrade, or driver repair completed on-site", status: "published" },
+        { id: "our-6", step: "06", title: "TEST & VERIFY", desc: "Verify everything runs smoothly together before you make payment", status: "published" }
       ]
     },
-    'who-we-serve': {
-      pageStatus: 'published',
-      badge: 'CUSTOMIZED ON-SITE SUPPORT',
-      title: 'Who We Serve in Peshawar',
-      subtitle: 'Whether you are a university student rushing to meet a project deadline, a family needing a dependable home computer, or an office requiring fast workstation maintenance, our on-site service adapts directly to your requirements.',
+    "who-we-serve": {
+      pageStatus: "published",
+      badge: "CUSTOMIZED ON-SITE SUPPORT",
+      title: "Who We Serve in Peshawar",
+      subtitle: "Whether you are a university student rushing to meet a project deadline, a family needing a dependable home computer, or an office requiring fast workstation maintenance, our on-site service adapts directly to your requirements.",
       audiences: [
         {
-          id: 'aud-students',
-          key: 'students',
-          title: 'STUDENTS',
-          tagline: 'Agriculture University, Peshawar Uni, Medical & Engineering Campuses',
-          headline: 'Your laptop is part of your education. Get computer problems handled without wasting your study day.',
-          badge: 'STUDENT FRIENDLY',
-          status: 'published',
+          id: "aud-students",
+          key: "students",
+          title: "STUDENTS",
+          tagline: "Agriculture University, Peshawar Uni, Medical & Engineering Campuses",
+          headline: "Your laptop is part of your education. Get computer problems handled without wasting your study day.",
+          badge: "STUDENT FRIENDLY",
+          status: "published",
           services: [
-            'Clean Windows 10 & 11 setups for semester work',
-            'HDD to SSD upgrades for old study laptops',
-            'BSOD & overheating diagnostics',
-            'Academic software, compilers & development environments',
-            'Thesis & lost assignment data recovery assistance',
-            'Special student turnaround speed'
+            "Clean Windows 10 & 11 setups for semester work",
+            "HDD to SSD upgrades for old study laptops",
+            "BSOD & overheating diagnostics",
+            "Academic software, compilers & development environments",
+            "Thesis & lost assignment data recovery assistance",
+            "Special student turnaround speed"
           ]
         },
         {
-          id: 'aud-home',
-          key: 'home-users',
-          title: 'HOME USERS',
-          tagline: 'Families, Personal Laptops & Home Desktops Across Peshawar',
-          headline: 'Computer problems at home? Get practical assistance without carrying your computer around.',
-          badge: 'MAXIMUM CONVENIENCE',
-          status: 'published',
+          id: "aud-home",
+          key: "home-users",
+          title: "HOME USERS",
+          tagline: "Families, Personal Laptops & Home Desktops Across Peshawar",
+          headline: "Computer problems at home? Get practical assistance without carrying your computer around.",
+          badge: "MAXIMUM CONVENIENCE",
+          status: "published",
           services: [
-            'Zero travel: no carrying heavy desktop towers in traffic',
-            'Full privacy: family photos & accounts stay safe in your home',
-            'Home Wi-Fi & wireless printer configuration',
-            'Slow PC cleanups & storage expansion',
-            'Parental controls & browser safety setups',
-            'Transparent in-person diagnosis in your living room'
+            "Zero travel: no carrying heavy desktop towers in traffic",
+            "Full privacy: family photos & accounts stay safe in your home",
+            "Home Wi-Fi & wireless printer configuration",
+            "Slow PC cleanups & storage expansion",
+            "Parental controls & browser safety setups",
+            "Transparent in-person diagnosis in your living room"
           ]
         },
         {
-          id: 'aud-offices',
-          key: 'offices',
-          title: 'OFFICES & ACADEMIES',
-          tagline: 'Small Businesses, Schools, Academies & Computer Labs',
+          id: "aud-offices",
+          key: "offices",
+          title: "OFFICES & ACADEMIES",
+          tagline: "Small Businesses, Schools, Academies & Computer Labs",
           headline: "Keep your team's computers working with on-site support and bulk Windows deployment.",
-          badge: 'WORKPLACE READY',
-          status: 'published',
+          badge: "WORKPLACE READY",
+          status: "published",
           services: [
-            'Bulk Windows deployment across 5, 10, 20 or 50+ PCs',
-            'Standardized workstation software & driver profiles',
-            'Network printer sharing & office file sharing',
-            'Scheduled weekend maintenance with zero downtime',
-            'Computer lab refreshes for schools & colleges',
-            'Formal receipts & documented hardware logs'
+            "Bulk Windows deployment across 5, 10, 20 or 50+ PCs",
+            "Standardized workstation software & driver profiles",
+            "Network printer sharing & office file sharing",
+            "Scheduled weekend maintenance with zero downtime",
+            "Computer lab refreshes for schools & colleges",
+            "Formal receipts & documented hardware logs"
           ]
         }
       ]
     },
-    'bulk-windows': {
-      pageStatus: 'published',
-      badge: 'INSTITUTIONAL LAB DEPLOYMENT',
-      title: 'Bulk Windows Deployment for Institutions & Offices',
-      subtitle: 'Standardized operating system deployment, driver automation, and application configuration for 5 to 50+ PCs in Peshawar.',
+    "bulk-windows": {
+      pageStatus: "published",
+      badge: "INSTITUTIONAL LAB DEPLOYMENT",
+      title: "Bulk Windows Deployment for Institutions & Offices",
+      subtitle: "Standardized operating system deployment, driver automation, and application configuration for 5 to 50+ PCs in Peshawar.",
       pricingTiers: [
-        { id: 'tier-1', minPCs: 5, maxPCs: 9, ratePerPc: 700, label: '5 - 9 Computers', desc: 'Small office / clinic batch', status: 'published' },
-        { id: 'tier-2', minPCs: 10, maxPCs: 19, ratePerPc: 600, label: '10 - 19 Computers', desc: 'Standard department / academy', status: 'published' },
-        { id: 'tier-3', minPCs: 20, maxPCs: 29, ratePerPc: 500, label: '20 - 29 Computers', desc: 'College / School lab wing', status: 'published' },
-        { id: 'tier-4', minPCs: 30, maxPCs: 100, ratePerPc: 450, label: '30+ Computers', desc: 'Full campus / enterprise refresh', status: 'published' }
+        { id: "tier-1", minPCs: 5, maxPCs: 9, ratePerPc: 700, label: "5 - 9 Computers", desc: "Small office / clinic batch", status: "published" },
+        { id: "tier-2", minPCs: 10, maxPCs: 19, ratePerPc: 600, label: "10 - 19 Computers", desc: "Standard department / academy", status: "published" },
+        { id: "tier-3", minPCs: 20, maxPCs: 29, ratePerPc: 500, label: "20 - 29 Computers", desc: "College / School lab wing", status: "published" },
+        { id: "tier-4", minPCs: 30, maxPCs: 100, ratePerPc: 450, label: "30+ Computers", desc: "Full campus / enterprise refresh", status: "published" }
       ],
       labFeatures: [
         {
-          id: 'lab-1',
-          title: 'Parallel USB 3.2 Deployment',
-          desc: 'Deploying multiple computers simultaneously using customized WinPE images cuts total lab downtime by up to 75% compared to single-disc setups.',
-          status: 'published'
+          id: "lab-1",
+          title: "Parallel USB 3.2 Deployment",
+          desc: "Deploying multiple computers simultaneously using customized WinPE images cuts total lab downtime by up to 75% compared to single-disc setups.",
+          status: "published"
         },
         {
-          id: 'lab-2',
-          title: 'Debloated Windows 10 / 11 Enterprise/Pro',
-          desc: 'Removal of consumer telemetry, pre-installed promotional games, Cortana bloat, and unwanted background background services for maximum speed on lab hardware.',
-          status: 'published'
+          id: "lab-2",
+          title: "Debloated Windows 10 / 11 Enterprise/Pro",
+          desc: "Removal of consumer telemetry, pre-installed promotional games, Cortana bloat, and unwanted background background services for maximum speed on lab hardware.",
+          status: "published"
         },
         {
-          id: 'lab-3',
-          title: 'Pre-Packaged Academic / Productivity Suites',
-          desc: 'Full installation of browsers, PDF readers, media players, WinRAR, and custom programming IDEs (VS Code, Python, C++, Java, Dev-C++) or office software.',
-          status: 'published'
+          id: "lab-3",
+          title: "Pre-Packaged Academic / Productivity Suites",
+          desc: "Full installation of browsers, PDF readers, media players, WinRAR, and custom programming IDEs (VS Code, Python, C++, Java, Dev-C++) or office software.",
+          status: "published"
         },
         {
-          id: 'lab-4',
-          title: 'Tamper-Resistant Security Policies',
-          desc: 'Configuring local group policies and restricted non-admin student profiles prevents unauthorized system setting changes and persistent malware.',
-          status: 'published'
+          id: "lab-4",
+          title: "Tamper-Resistant Security Policies",
+          desc: "Configuring local group policies and restricted non-admin student profiles prevents unauthorized system setting changes and persistent malware.",
+          status: "published"
         }
       ]
     },
     technician: {
-      pageStatus: 'published',
-      badge: 'PRIMARY TECHNICIAN PROFILE',
-      title: 'Meet Your Technician: Safiullah',
-      subtitle: 'Independent on-site technical assistance by Safiullah — Computer Science & Cybersecurity practitioner in Peshawar.',
+      pageStatus: "published",
+      badge: "PRIMARY TECHNICIAN PROFILE",
+      title: "Meet Your Technician: Safiullah",
+      subtitle: "Independent on-site technical assistance by Safiullah \u2014 Computer Science & Cybersecurity practitioner in Peshawar.",
       ethicalCodes: [
         {
-          id: 'ethic-1',
-          title: 'Zero Snooping & Absolute Confidentiality',
-          desc: 'Your personal photos, academic projects, browser cookies, and financial documents remain strictly private. I diagnose and service your computer right before your eyes.',
-          status: 'published'
+          id: "ethic-1",
+          title: "Zero Snooping & Absolute Confidentiality",
+          desc: "Your personal photos, academic projects, browser cookies, and financial documents remain strictly private. I diagnose and service your computer right before your eyes.",
+          status: "published"
         },
         {
-          id: 'ethic-2',
-          title: 'Technical Honesty: No Fabricated Faults',
-          desc: 'If a problem is caused by a loose ribbon cable or outdated driver, I tell you immediately. I never invent nonexistent motherboard or chipset failures to inflate fees.',
-          status: 'published'
+          id: "ethic-2",
+          title: "Technical Honesty: No Fabricated Faults",
+          desc: "If a problem is caused by a loose ribbon cable or outdated driver, I tell you immediately. I never invent nonexistent motherboard or chipset failures to inflate fees.",
+          status: "published"
         },
         {
-          id: 'ethic-3',
-          title: 'Root-Cause Diagnostics Over Blind Formatting',
-          desc: 'Many local technicians blindly format your drive when Windows crashes. I inspect minidump BSOD crash logs, test RAM blocks, and isolate hardware errors to solve the real cause.',
-          status: 'published'
+          id: "ethic-3",
+          title: "Root-Cause Diagnostics Over Blind Formatting",
+          desc: "Many local technicians blindly format your drive when Windows crashes. I inspect minidump BSOD crash logs, test RAM blocks, and isolate hardware errors to solve the real cause.",
+          status: "published"
         },
         {
-          id: 'ethic-4',
-          title: 'Clear, Respectful Communication',
-          desc: 'Explaining technical concepts in polite, plain Pashto, Urdu, or English so you understand what happened and how to avoid recurring issues.',
-          status: 'published'
+          id: "ethic-4",
+          title: "Clear, Respectful Communication",
+          desc: "Explaining technical concepts in polite, plain Pashto, Urdu, or English so you understand what happened and how to avoid recurring issues.",
+          status: "published"
         }
       ]
     },
     faq: {
-      pageStatus: 'published',
-      badge: 'FREQUENTLY ASKED QUESTIONS',
-      title: 'Frequently Asked Questions',
-      subtitle: 'Clear, direct answers about our on-site computer support in Peshawar, pricing, privacy, and procedures.'
+      pageStatus: "published",
+      badge: "FREQUENTLY ASKED QUESTIONS",
+      title: "Frequently Asked Questions",
+      subtitle: "Clear, direct answers about our on-site computer support in Peshawar, pricing, privacy, and procedures."
     },
     contact: {
-      pageStatus: 'published',
-      badge: 'DIRECT ON-SITE DISPATCH',
-      title: 'Schedule On-Site Support or Consult Directly',
-      subtitle: 'Choose the easiest way to reach us. Submit our service booking form or send a WhatsApp message for rapid response in Peshawar.',
+      pageStatus: "published",
+      badge: "DIRECT ON-SITE DISPATCH",
+      title: "Schedule On-Site Support or Consult Directly",
+      subtitle: "Choose the easiest way to reach us. Submit our service booking form or send a WhatsApp message for rapid response in Peshawar.",
       peshawarAreas: [
-        { id: 'area-1', name: 'University Town', speed: '20 - 40 Mins', note: 'Fast Dispatch', status: 'published' },
-        { id: 'area-2', name: 'Hayatabad (Phases 1 - 7)', speed: '30 - 50 Mins', note: 'Daily Coverage', status: 'published' },
-        { id: 'area-3', name: 'Board Bazaar & Tehkal', speed: '20 - 35 Mins', note: 'Fast Dispatch', status: 'published' },
-        { id: 'area-4', name: 'UoA / UoP Campus & Hostels', speed: '15 - 30 Mins', note: 'Direct Access', status: 'published' },
-        { id: 'area-5', name: 'Saddar & Cantt Areas', speed: '30 - 50 Mins', note: 'Daily Coverage', status: 'published' },
-        { id: 'area-6', name: 'Warsak Road & Surrounds', speed: '35 - 55 Mins', note: 'Scheduled Visits', status: 'published' },
-        { id: 'area-7', name: 'Ring Road & Gulbahar', speed: '35 - 55 Mins', note: 'Daily Coverage', status: 'published' },
-        { id: 'area-8', name: 'Dalazak Road & Kohat Road', speed: '45 - 65 Mins', note: 'Scheduled Visits', status: 'published' }
+        { id: "area-1", name: "University Town", speed: "20 - 40 Mins", note: "Fast Dispatch", status: "published" },
+        { id: "area-2", name: "Hayatabad (Phases 1 - 7)", speed: "30 - 50 Mins", note: "Daily Coverage", status: "published" },
+        { id: "area-3", name: "Board Bazaar & Tehkal", speed: "20 - 35 Mins", note: "Fast Dispatch", status: "published" },
+        { id: "area-4", name: "UoA / UoP Campus & Hostels", speed: "15 - 30 Mins", note: "Direct Access", status: "published" },
+        { id: "area-5", name: "Saddar & Cantt Areas", speed: "30 - 50 Mins", note: "Daily Coverage", status: "published" },
+        { id: "area-6", name: "Warsak Road & Surrounds", speed: "35 - 55 Mins", note: "Scheduled Visits", status: "published" },
+        { id: "area-7", name: "Ring Road & Gulbahar", speed: "35 - 55 Mins", note: "Daily Coverage", status: "published" },
+        { id: "area-8", name: "Dalazak Road & Kohat Road", speed: "45 - 65 Mins", note: "Scheduled Visits", status: "published" }
       ]
     }
   }
 };
-
-// In-memory cache + file sync
 db = { ...defaultData };
-
 function loadDb() {
   ensureDbDirectory();
-  // On serverless cold boot (e.g. Vercel), seed /tmp from repository database.json if not present
-  const repoDbFile = path.join(APP_ROOT, 'data', 'database.json');
+  const repoDbFile = path.join(APP_ROOT, "data", "database.json");
   if (!fs.existsSync(DB_FILE) && fs.existsSync(repoDbFile)) {
     try {
-      const seedContent = fs.readFileSync(repoDbFile, 'utf-8');
-      fs.writeFileSync(DB_FILE, seedContent, 'utf-8');
+      const seedContent = fs.readFileSync(repoDbFile, "utf-8");
+      fs.writeFileSync(DB_FILE, seedContent, "utf-8");
     } catch (seedErr) {
-      console.warn('[DB] Cold start /tmp seed note:', (seedErr as any)?.message);
+      console.warn("[DB] Cold start /tmp seed note:", seedErr?.message);
     }
   }
-
   if (fs.existsSync(DB_FILE)) {
     try {
-      const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      const raw = fs.readFileSync(DB_FILE, "utf-8");
       const parsed = JSON.parse(raw);
       db = {
-        settings: { ...defaultData.settings, ...(parsed.settings || {}) },
+        settings: { ...defaultData.settings, ...parsed.settings || {} },
         services: Array.isArray(parsed.services) ? parsed.services : defaultData.services,
         serviceAreas: Array.isArray(parsed.serviceAreas) ? parsed.serviceAreas : defaultData.serviceAreas,
         faqs: Array.isArray(parsed.faqs) ? parsed.faqs : defaultData.faqs,
         caseStudies: Array.isArray(parsed.caseStudies) ? parsed.caseStudies : defaultData.caseStudies,
         bookings: Array.isArray(parsed.bookings) ? parsed.bookings : defaultData.bookings,
-        inquiries: Array.isArray(parsed.inquiries) ? parsed.inquiries : (defaultData.inquiries || []),
-        websiteContent: { ...defaultData.websiteContent, ...(parsed.websiteContent || {}) },
+        inquiries: Array.isArray(parsed.inquiries) ? parsed.inquiries : defaultData.inquiries || [],
+        websiteContent: { ...defaultData.websiteContent, ...parsed.websiteContent || {} },
         categories: Array.isArray(parsed.categories) ? parsed.categories : defaultData.categories,
         media: Array.isArray(parsed.media) ? parsed.media : defaultData.media,
         customers: Array.isArray(parsed.customers) ? parsed.customers : defaultData.customers,
@@ -2003,168 +2147,138 @@ function loadDb() {
     saveDb();
   }
 }
-
 function saveDb() {
   ensureDbDirectory();
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
   } catch (err) {
     console.error("Error saving database file:", err);
   }
 }
-
 loadDb();
 NOTIFICATION_DESTINATION = getNotificationDestination();
-
-// Async Firestore overlay — tracked as a promise so API endpoints can await it.
-// This ELIMINATES the flash of wrong data (old phone/email for ~1 sec) on first load.
-let _firestoreReadyResolve: () => void;
-const firestoreReady: Promise<void> = new Promise(resolve => { _firestoreReadyResolve = resolve; });
-
+var _firestoreReadyResolve;
+var firestoreReady = new Promise((resolve) => {
+  _firestoreReadyResolve = resolve;
+});
 (async () => {
   try {
     const adminDb = getAdminFirestore();
-
-    // 1. Site configuration overlay
     const firestoreSettings = await loadSettingsFromFirestore();
-    if (firestoreSettings && typeof firestoreSettings === 'object' && Object.keys(firestoreSettings).length > 0) {
+    if (firestoreSettings && typeof firestoreSettings === "object" && Object.keys(firestoreSettings).length > 0) {
       db.settings = { ...db.settings, ...firestoreSettings };
     }
-
-    // 2. Email settings overlay & env-var seed to Firestore settings/email
     const emailCreds = await getFullEmailSettings();
     NOTIFICATION_DESTINATION = emailCreds.adminEmail || getNotificationDestination();
-
-    const envResendKey = (process.env.RESEND_API_KEY || '').trim();
-    const envGmailPass = (process.env.GMAIL_APP_PASSWORD || process.env.GOOGLE_APP_PASSWORD || '').trim();
-    if ((!emailCreds.resendApiKey && envResendKey) || (!emailCreds.smtpPassword && envGmailPass)) {
+    const envResendKey = (process.env.RESEND_API_KEY || "").trim();
+    const envGmailPass = (process.env.GMAIL_APP_PASSWORD || process.env.GOOGLE_APP_PASSWORD || "").trim();
+    if (!emailCreds.resendApiKey && envResendKey || !emailCreds.smtpPassword && envGmailPass) {
       await saveEmailSettings({
-        resendApiKey: envResendKey || undefined,
-        gmailAppPassword: envGmailPass || undefined,
+        resendApiKey: envResendKey || void 0,
+        gmailAppPassword: envGmailPass || void 0,
         senderEmail: process.env.RESEND_FROM || process.env.FROM_EMAIL,
         adminEmail: process.env.TARGET_EMAIL || process.env.ADMIN_EMAIL,
-        smtpUser: process.env.GMAIL_USER || process.env.GMAIL_ADDRESS,
+        smtpUser: process.env.GMAIL_USER || process.env.GMAIL_ADDRESS
       });
-      console.log('[FIRESTORE] ✅ Initial email credentials seeded from environment variables to Firestore (settings/email)');
+      console.log("[FIRESTORE] \u2705 Initial email credentials seeded from environment variables to Firestore (settings/email)");
     }
-
-    // 3. Services collection overlay / seed
-    const servicesSnap = await adminDb.collection('services').get().catch(() => null);
+    const servicesSnap = await adminDb.collection("services").get().catch(() => null);
     if (servicesSnap && !servicesSnap.empty) {
-      db.services = servicesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      console.log(`[FIRESTORE] ✅ db.services overlaid (${db.services.length} items) from Firestore on startup`);
+      db.services = servicesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      console.log(`[FIRESTORE] \u2705 db.services overlaid (${db.services.length} items) from Firestore on startup`);
     } else if (Array.isArray(db.services) && db.services.length > 0) {
       for (const s of db.services) {
-        if (s.id) await adminDb.collection('services').doc(s.id).set(s, { merge: true }).catch(() => {});
+        if (s.id) await adminDb.collection("services").doc(s.id).set(s, { merge: true }).catch(() => {
+        });
       }
-      console.log(`[FIRESTORE] ✅ Seeded initial ${db.services.length} services to Firestore`);
+      console.log(`[FIRESTORE] \u2705 Seeded initial ${db.services.length} services to Firestore`);
     }
-
-    // 4. FAQs collection overlay / seed
-    const faqsSnap = await adminDb.collection('faqs').get().catch(() => null);
+    const faqsSnap = await adminDb.collection("faqs").get().catch(() => null);
     if (faqsSnap && !faqsSnap.empty) {
-      db.faqs = faqsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      console.log(`[FIRESTORE] ✅ db.faqs overlaid (${db.faqs.length} items) from Firestore on startup`);
+      db.faqs = faqsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      console.log(`[FIRESTORE] \u2705 db.faqs overlaid (${db.faqs.length} items) from Firestore on startup`);
     } else if (Array.isArray(db.faqs) && db.faqs.length > 0) {
       for (const f of db.faqs) {
-        if (f.id) await adminDb.collection('faqs').doc(f.id).set(f, { merge: true }).catch(() => {});
+        if (f.id) await adminDb.collection("faqs").doc(f.id).set(f, { merge: true }).catch(() => {
+        });
       }
-      console.log(`[FIRESTORE] ✅ Seeded initial ${db.faqs.length} FAQs to Firestore`);
+      console.log(`[FIRESTORE] \u2705 Seeded initial ${db.faqs.length} FAQs to Firestore`);
     }
-
-    // 5. Case Studies collection overlay / seed
-    const casesSnap = await adminDb.collection('caseStudies').get().catch(() => null);
+    const casesSnap = await adminDb.collection("caseStudies").get().catch(() => null);
     if (casesSnap && !casesSnap.empty) {
-      db.caseStudies = casesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      console.log(`[FIRESTORE] ✅ db.caseStudies overlaid (${db.caseStudies.length} items) from Firestore on startup`);
+      db.caseStudies = casesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      console.log(`[FIRESTORE] \u2705 db.caseStudies overlaid (${db.caseStudies.length} items) from Firestore on startup`);
     } else if (Array.isArray(db.caseStudies) && db.caseStudies.length > 0) {
       for (const c of db.caseStudies) {
-        if (c.id) await adminDb.collection('caseStudies').doc(c.id).set(c, { merge: true }).catch(() => {});
+        if (c.id) await adminDb.collection("caseStudies").doc(c.id).set(c, { merge: true }).catch(() => {
+        });
       }
-      console.log(`[FIRESTORE] ✅ Seeded initial ${db.caseStudies.length} case studies to Firestore`);
+      console.log(`[FIRESTORE] \u2705 Seeded initial ${db.caseStudies.length} case studies to Firestore`);
     }
-
-    // 6. Problem Solutions overlay & initial seed
     const firestoreSolutions = await loadProblemSolutionsFromFirestore();
     if (Array.isArray(firestoreSolutions) && firestoreSolutions.length > 0) {
       db.problemSolutions = firestoreSolutions;
-      console.log(`[FIRESTORE] ✅ db.problemSolutions overlaid (${firestoreSolutions.length} items) from Firestore on startup`);
+      console.log(`[FIRESTORE] \u2705 db.problemSolutions overlaid (${firestoreSolutions.length} items) from Firestore on startup`);
     } else if (Array.isArray(db.problemSolutions) && db.problemSolutions.length > 0) {
       await saveProblemSolutionsToFirestore(db.problemSolutions);
-      console.log(`[FIRESTORE] ✅ Seeded initial ${db.problemSolutions.length} problem solutions to Firestore`);
+      console.log(`[FIRESTORE] \u2705 Seeded initial ${db.problemSolutions.length} problem solutions to Firestore`);
     }
-
-    // 7. Problem Leads overlay
     const firestoreLeads = await loadProblemLeadsFromFirestore();
     if (Array.isArray(firestoreLeads) && firestoreLeads.length > 0) {
       db.problemLeads = firestoreLeads;
-      console.log(`[FIRESTORE] ✅ db.problemLeads overlaid (${firestoreLeads.length} items) from Firestore on startup`);
+      console.log(`[FIRESTORE] \u2705 db.problemLeads overlaid (${firestoreLeads.length} items) from Firestore on startup`);
     }
   } catch (err) {
-    console.error('[FIRESTORE] Startup overlay error:', err);
+    console.error("[FIRESTORE] Startup overlay error:", err);
   } finally {
-    _firestoreReadyResolve!(); // always resolve so requests never hang
+    _firestoreReadyResolve();
   }
 })();
-
-// Dynamic file server and auto-recovery for uploaded assets
-app.get('/uploads/:filename', (req, res, next) => {
+app.get("/uploads/:filename", (req, res, next) => {
   const filename = req.params.filename;
   const filePath = path.join(UPLOADS_DIR, filename);
-  
   if (fs.existsSync(filePath)) {
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader("Cache-Control", "public, max-age=86400");
     return res.sendFile(filePath);
   }
-
-  // Auto-recovery: Check if image exists in db.media or db.settings
   const targetUrl = `/uploads/${filename}`;
-  const found = db.media?.find((m: any) => m.url === targetUrl || m.url?.endsWith(`/${filename}`));
-  const dataUrlCandidate = found?.dataUrl || (db.settings?.technicianPhoto?.startsWith('data:image/') ? db.settings.technicianPhoto : null);
-  
-  if (dataUrlCandidate && dataUrlCandidate.startsWith('data:image/')) {
+  const found = db.media?.find((m) => m.url === targetUrl || m.url?.endsWith(`/${filename}`));
+  const dataUrlCandidate = found?.dataUrl || (db.settings?.technicianPhoto?.startsWith("data:image/") ? db.settings.technicianPhoto : null);
+  if (dataUrlCandidate && dataUrlCandidate.startsWith("data:image/")) {
     const matches = dataUrlCandidate.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
     if (matches && matches[2]) {
       const mime = `image/${matches[1]}`;
-      const buf = Buffer.from(matches[2].replace(/\s+/g, ''), 'base64');
-      // Re-create the file in UPLOADS_DIR so future requests are static
+      const buf = Buffer.from(matches[2].replace(/\s+/g, ""), "base64");
       try {
         if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
         fs.writeFileSync(filePath, buf);
       } catch (e) {
-        console.warn('Auto-recreating upload file on disk note:', e);
+        console.warn("Auto-recreating upload file on disk note:", e);
       }
-      res.setHeader('Content-Type', mime);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader("Content-Type", mime);
+      res.setHeader("Cache-Control", "public, max-age=86400");
       return res.send(buf);
     }
   }
-
   next();
 });
-
-// Serve uploaded files statically
-app.use('/uploads', express.static(UPLOADS_DIR));
-
-// Public Data API
-// Public Data API — awaits Firestore ready on first load so no wrong data flash
-app.get('/api/data', async (req, res) => {
-  // Wait for Firestore settings to be applied (only blocks on very first cold start request)
+app.use("/uploads", express.static(UPLOADS_DIR));
+app.get("/api/data", async (req, res) => {
   await Promise.race([
     firestoreReady,
-    new Promise(resolve => setTimeout(resolve, 3000)) // max 3s wait, then serve anyway
+    new Promise((resolve) => setTimeout(resolve, 3e3))
+    // max 3s wait, then serve anyway
   ]);
   const publicSettings = { ...db.settings };
-  delete (publicSettings as any).resendApiKey;
-  delete (publicSettings as any).gmailAppPassword;
-  delete (publicSettings as any).adminPassword;
-  delete (publicSettings as any).apiSecret;
-  delete (publicSettings as any).smtpPassword;
-  delete (publicSettings as any).smtpUser;
-  delete (publicSettings as any).brevoApiKey;
-
+  delete publicSettings.resendApiKey;
+  delete publicSettings.gmailAppPassword;
+  delete publicSettings.adminPassword;
+  delete publicSettings.apiSecret;
+  delete publicSettings.smtpPassword;
+  delete publicSettings.smtpUser;
+  delete publicSettings.brevoApiKey;
   res.json({
-    services: db.services.filter((s: any) => s.status === 'active'),
+    services: db.services.filter((s) => s.status === "active"),
     faqs: db.faqs,
     settings: publicSettings,
     serviceAreas: db.serviceAreas,
@@ -2172,41 +2286,34 @@ app.get('/api/data', async (req, res) => {
     websiteContent: db.websiteContent,
     categories: db.categories,
     pageSections: db.pageSections,
-    problemSolutions: (db.problemSolutions || []).filter((p: any) => p.status !== 'unpublished')
+    problemSolutions: (db.problemSolutions || []).filter((p) => p.status !== "unpublished")
   });
 });
-
-app.get('/api/admin/settings', checkAdminAuth, async (req, res) => {
+app.get("/api/admin/settings", checkAdminAuth, async (req, res) => {
   try {
     const adminDb = getAdminFirestore();
-    const configSnap = await adminDb.collection('settings').doc('site_config').get().catch(() => null);
-    const siteConfig = (configSnap && configSnap.exists) ? configSnap.data() || {} : (db?.settings || {});
+    const configSnap = await adminDb.collection("settings").doc("site_config").get().catch(() => null);
+    const siteConfig = configSnap && configSnap.exists ? configSnap.data() || {} : db?.settings || {};
     const safeEmail = await getSafeEmailSettings();
-
-    // Strip any sensitive secrets that might have been in siteConfig
-    delete (siteConfig as any).resendApiKey;
-    delete (siteConfig as any).gmailAppPassword;
-    delete (siteConfig as any).smtpPassword;
-    delete (siteConfig as any).adminPassword;
-    delete (siteConfig as any).apiSecret;
-
+    delete siteConfig.resendApiKey;
+    delete siteConfig.gmailAppPassword;
+    delete siteConfig.smtpPassword;
+    delete siteConfig.adminPassword;
+    delete siteConfig.apiSecret;
     res.json({
       settings: {
         ...siteConfig,
         ...safeEmail
       }
     });
-  } catch (err: any) {
+  } catch (err) {
     res.status(500).json({ error: "Failed to load admin settings: " + err?.message });
   }
 });
-
-app.get('/api/page-sections', (req, res) => {
+app.get("/api/page-sections", (req, res) => {
   res.json(db.pageSections);
 });
-
-// Public Service Request Submission
-app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
+app.post("/api/bookings", publicApiRateLimiter, (req, res) => {
   const {
     fullName,
     email,
@@ -2222,30 +2329,20 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
     urgency,
     containsImportantData
   } = req.body;
-
   if (!fullName || !phone || !problemDescription || !email || !String(email).trim()) {
     return res.status(400).json({ error: "Please provide Full Name, Email Address, Phone Number, and Problem Description." });
   }
-
   const cleanEmail = String(email).trim();
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(cleanEmail)) {
     return res.status(400).json({ error: "Please provide a valid Email Address for instant confirmation." });
   }
-
   const cleanPhone = String(phone).trim();
-  const cleanPhoneDigits = cleanPhone.replace(/[^0-9]/g, '');
-
-  // Duplicate submission protection: Reject identical submission within last 10 minutes
-  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-  const recentDuplicate = (db.bookings || []).find((b: any) =>
-    b.createdAt && b.createdAt >= tenMinutesAgo &&
-    (
-      (b.phone && b.phone.replace(/[^0-9]/g, '') === cleanPhoneDigits) ||
-      (b.email && b.email.toLowerCase() === cleanEmail.toLowerCase())
-    )
+  const cleanPhoneDigits = cleanPhone.replace(/[^0-9]/g, "");
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1e3).toISOString();
+  const recentDuplicate = (db.bookings || []).find(
+    (b) => b.createdAt && b.createdAt >= tenMinutesAgo && (b.phone && b.phone.replace(/[^0-9]/g, "") === cleanPhoneDigits || b.email && b.email.toLowerCase() === cleanEmail.toLowerCase())
   );
-
   if (recentDuplicate) {
     return res.status(409).json({
       success: false,
@@ -2254,10 +2351,9 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
       message: `A service request was already received from this contact in the last 10 minutes (Reference ID: ${recentDuplicate.id}). Our technician is already reviewing it.`
     });
   }
-
   const newBooking = {
     id: `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
-    createdAt: new Date().toISOString(),
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     fullName: String(fullName).trim(),
     email: cleanEmail,
     phone: String(phone).trim(),
@@ -2267,17 +2363,15 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
     computerBrandModel: String(computerBrandModel || "").trim(),
     serviceRequired: String(serviceRequired || "General Troubleshooting").trim(),
     problemDescription: String(problemDescription).trim(),
-    preferredDate: preferredDate || new Date().toISOString().split('T')[0],
+    preferredDate: preferredDate || (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
     preferredTime: preferredTime || "Morning (10 AM - 1 PM)",
     urgency: urgency === "Urgent" ? "Urgent" : "Normal",
     containsImportantData: containsImportantData === "YES" ? "YES" : "NO",
     status: "NEW",
     adminNotes: ""
   };
-
-  // 1. Insert into Leads (Inquiries) first as required
   const newLead = {
-    id: `INQ-${newBooking.id.replace(/^PSH-/, '')}`,
+    id: `INQ-${newBooking.id.replace(/^PSH-/, "")}`,
     bookingId: newBooking.id,
     fullName: newBooking.fullName,
     name: newBooking.fullName,
@@ -2285,14 +2379,18 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
     phone: newBooking.phone,
     whatsapp: newBooking.whatsapp,
     area: newBooking.area,
-    subject: `Service Request: ${newBooking.serviceRequired} (${newBooking.deviceType}${newBooking.computerBrandModel ? ' — ' + newBooking.computerBrandModel : ''})`,
+    subject: `Service Request: ${newBooking.serviceRequired} (${newBooking.deviceType}${newBooking.computerBrandModel ? " \u2014 " + newBooking.computerBrandModel : ""})`,
     service: newBooking.serviceRequired,
     budget: "Pending On-Site Inspection (From Rs. 500)",
-    message: `Problem: ${newBooking.problemDescription}\nDevice: ${newBooking.deviceType} ${newBooking.computerBrandModel || ''}\nSchedule: ${newBooking.preferredDate} (${newBooking.preferredTime})\nUrgency: ${newBooking.urgency}\nCritical Data: ${newBooking.containsImportantData}`,
+    message: `Problem: ${newBooking.problemDescription}
+Device: ${newBooking.deviceType} ${newBooking.computerBrandModel || ""}
+Schedule: ${newBooking.preferredDate} (${newBooking.preferredTime})
+Urgency: ${newBooking.urgency}
+Critical Data: ${newBooking.containsImportantData}`,
     status: "NEW",
     emailNotificationStatus: "sent",
     emailNotificationSentTo: NOTIFICATION_DESTINATION,
-    emailNotificationSentAt: new Date().toISOString(),
+    emailNotificationSentAt: (/* @__PURE__ */ new Date()).toISOString(),
     emailNotificationProvider: "smtp",
     createdAt: newBooking.createdAt,
     preferredDate: newBooking.preferredDate,
@@ -2302,33 +2400,26 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
     urgency: newBooking.urgency,
     containsImportantData: newBooking.containsImportantData
   };
-
   if (!Array.isArray(db.inquiries)) {
     db.inquiries = [];
   }
   db.inquiries.unshift(newLead);
-  (newBooking as any).leadId = newLead.id;
-
-  // 2. Insert into Bookings
+  newBooking.leadId = newLead.id;
   db.bookings.unshift(newBooking);
-
-  // Persist directly into Firestore collections via Firebase Admin SDK
   try {
     const adminDb = getAdminFirestore();
     Promise.all([
-      adminDb.collection('bookings').doc(newBooking.id).set(newBooking).catch(e => console.warn('[FIRESTORE] bookings write warning:', e?.message)),
-      adminDb.collection('serviceRequests').doc(newBooking.id).set(newBooking).catch(e => console.warn('[FIRESTORE] serviceRequests write warning:', e?.message)),
-      adminDb.collection('requests').doc(newBooking.id).set(newBooking).catch(e => console.warn('[FIRESTORE] requests write warning:', e?.message)),
-      adminDb.collection('inquiries').doc(newLead.id).set(newLead).catch(e => console.warn('[FIRESTORE] inquiries write warning:', e?.message))
+      adminDb.collection("bookings").doc(newBooking.id).set(newBooking).catch((e) => console.warn("[FIRESTORE] bookings write warning:", e?.message)),
+      adminDb.collection("serviceRequests").doc(newBooking.id).set(newBooking).catch((e) => console.warn("[FIRESTORE] serviceRequests write warning:", e?.message)),
+      adminDb.collection("requests").doc(newBooking.id).set(newBooking).catch((e) => console.warn("[FIRESTORE] requests write warning:", e?.message)),
+      adminDb.collection("inquiries").doc(newLead.id).set(newLead).catch((e) => console.warn("[FIRESTORE] inquiries write warning:", e?.message))
     ]).then(() => {
-      console.log(`[FIRESTORE] ✅ Booking ${newBooking.id} & inquiry ${newLead.id} saved to Firestore`);
+      console.log(`[FIRESTORE] \u2705 Booking ${newBooking.id} & inquiry ${newLead.id} saved to Firestore`);
     });
-  } catch (fsSyncErr: any) {
-    console.error('[FIRESTORE] ❌ Admin SDK error:', fsSyncErr?.message || fsSyncErr);
+  } catch (fsSyncErr) {
+    console.error("[FIRESTORE] \u274C Admin SDK error:", fsSyncErr?.message || fsSyncErr);
   }
-
-  // Sync or create customer record
-  const existingCust = db.customers.find((c: any) => c.phone.replace(/\s+/g, '') === newBooking.phone.replace(/\s+/g, '')) as any;
+  const existingCust = db.customers.find((c) => c.phone.replace(/\s+/g, "") === newBooking.phone.replace(/\s+/g, ""));
   if (existingCust) {
     existingCust.totalBookings += 1;
     existingCust.lastServiceDate = "Just now";
@@ -2336,10 +2427,10 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
       existingCust.email = newBooking.email;
     }
     if (newBooking.computerBrandModel && !existingCust.devices?.includes(newBooking.computerBrandModel)) {
-      existingCust.devices = [...(existingCust.devices || []), newBooking.computerBrandModel];
+      existingCust.devices = [...existingCust.devices || [], newBooking.computerBrandModel];
     }
   } else {
-    (db.customers as any).unshift({
+    db.customers.unshift({
       id: `cust-${Date.now()}`,
       name: newBooking.fullName,
       email: newBooking.email,
@@ -2353,20 +2444,15 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
       devices: newBooking.computerBrandModel ? [newBooking.computerBrandModel] : [newBooking.deviceType]
     });
   }
-
-  // Activity log
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "New Request Submitted",
     details: `${newBooking.fullName} requested ${newBooking.serviceRequired} (${newBooking.area})`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Customer (Online)"
   });
-
-  // Trigger technician email notification alert
-  const waNumber = cleanPhoneDigits.startsWith('0') ? '92' + cleanPhoneDigits.slice(1) : cleanPhoneDigits.startsWith('+') ? cleanPhoneDigits.slice(1) : cleanPhoneDigits;
+  const waNumber = cleanPhoneDigits.startsWith("0") ? "92" + cleanPhoneDigits.slice(1) : cleanPhoneDigits.startsWith("+") ? cleanPhoneDigits.slice(1) : cleanPhoneDigits;
   const waReplyLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(`Hello ${newBooking.fullName}, this is Safiullah from TechFix Peshawar regarding your ${newBooking.serviceRequired} request.`)}`;
-
   const bookingEmailHtml = `
   <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b;">
     <div style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center;">
@@ -2403,7 +2489,7 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
         </tr>
         <tr>
           <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Device & Model:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `— ${newBooking.computerBrandModel}` : ''}</td>
+          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `\u2014 ${newBooking.computerBrandModel}` : ""}</td>
         </tr>
         <tr>
           <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Preferred Schedule:</td>
@@ -2411,7 +2497,7 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
         </tr>
         <tr>
           <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Urgency:</td>
-          <td style="padding: 8px 0; color: ${newBooking.urgency === 'Urgent' ? '#f87171' : '#f8fafc'}; font-size: 14px; font-weight: bold;">${newBooking.urgency.toUpperCase()}</td>
+          <td style="padding: 8px 0; color: ${newBooking.urgency === "Urgent" ? "#f87171" : "#f8fafc"}; font-size: 14px; font-weight: bold;">${newBooking.urgency.toUpperCase()}</td>
         </tr>
         <tr>
           <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Important Data:</td>
@@ -2435,20 +2521,19 @@ app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
     </div>
     
     <div style="background-color: #090d16; padding: 16px; text-align: center; border-top: 1px solid #1e293b; font-size: 12px; color: #64748b;">
-      Dispatched automatically to ${NOTIFICATION_DESTINATION} • TechFix On-Site Computer Support Peshawar
+      Dispatched automatically to ${NOTIFICATION_DESTINATION} \u2022 TechFix On-Site Computer Support Peshawar
     </div>
   </div>
   `;
-
   const bookingEmailText = `
-🔔 NEW ON-SITE SERVICE REQUEST / BOOKING
+\u{1F514} NEW ON-SITE SERVICE REQUEST / BOOKING
 ID: ${newBooking.id}
 Customer: ${newBooking.fullName}
 Phone: ${newBooking.phone}
 WhatsApp: ${newBooking.whatsapp}
 Area: ${newBooking.area} (Peshawar)
 Service: ${newBooking.serviceRequired}
-Device: ${newBooking.deviceType} ${newBooking.computerBrandModel || ''}
+Device: ${newBooking.deviceType} ${newBooking.computerBrandModel || ""}
 Urgency: ${newBooking.urgency}
 Important Data: ${newBooking.containsImportantData}
 Preferred Slot: ${newBooking.preferredDate} - ${newBooking.preferredTime}
@@ -2460,17 +2545,13 @@ ${newBooking.problemDescription}
 WhatsApp Quick Reply:
 ${waReplyLink}
 `;
-
-  // 1. Dispatch technician alert notification
   dispatchEmail({
     to: NOTIFICATION_DESTINATION,
     subject: `[${newBooking.urgency.toUpperCase()}] New Booking: ${newBooking.fullName} (${newBooking.area}) - ${getPeshawarShortTimeString()}`,
     html: bookingEmailHtml,
     text: bookingEmailText
-  }).catch(err => console.error("Technician email dispatch catch:", err));
-
-  // 2. Automated Confirmation Email directly to the Customer (if customer provided an email address)
-  if (newBooking.email && newBooking.email.includes('@')) {
+  }).catch((err) => console.error("Technician email dispatch catch:", err));
+  if (newBooking.email && newBooking.email.includes("@")) {
     const customerConfirmationHtml = `
     <!DOCTYPE html>
     <html>
@@ -2485,10 +2566,10 @@ ${waReplyLink}
         <!-- Header -->
         <div style="background: linear-gradient(135deg, #0284c7, #0f766e); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
           <div style="display:inline-block; background-color:rgba(15, 23, 42, 0.7); color:#38bdf8; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:4px 12px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(56, 189, 248, 0.4);">
-            ✓ REQUEST RECEIVED & LOGGED
+            \u2713 REQUEST RECEIVED & LOGGED
           </div>
           <h1 style="margin:0; font-size:22px; font-weight:800; color:#ffffff; letter-spacing:-0.5px;">
-            TechFix Peshawar • Booking Confirmation
+            TechFix Peshawar \u2022 Booking Confirmation
           </h1>
           <p style="margin:6px 0 0 0; font-size:13px; color:#cbd5e1;">
             Reliable On-Site Computer Support in Peshawar
@@ -2523,7 +2604,7 @@ ${waReplyLink}
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
                 <td style="padding:10px 0; color:#94a3b8;">Device:</td>
-                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `(${newBooking.computerBrandModel})` : ''}</td>
+                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `(${newBooking.computerBrandModel})` : ""}</td>
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
                 <td style="padding:10px 0; color:#94a3b8;">Location / Area:</td>
@@ -2531,12 +2612,12 @@ ${waReplyLink}
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
                 <td style="padding:10px 0; color:#94a3b8;">Preferred Window:</td>
-                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.preferredDate} — ${newBooking.preferredTime}</td>
+                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.preferredDate} \u2014 ${newBooking.preferredTime}</td>
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
                 <td style="padding:10px 0; color:#94a3b8;">Data Safety Alert:</td>
-                <td style="padding:10px 0; color:${newBooking.containsImportantData === 'YES' ? '#38bdf8' : '#94a3b8'}; font-weight:bold;">
-                  ${newBooking.containsImportantData === 'YES' ? 'PROTECTED (Important Data Flagged)' : 'Standard'}
+                <td style="padding:10px 0; color:${newBooking.containsImportantData === "YES" ? "#38bdf8" : "#94a3b8"}; font-weight:bold;">
+                  ${newBooking.containsImportantData === "YES" ? "PROTECTED (Important Data Flagged)" : "Standard"}
                 </td>
               </tr>
               <tr>
@@ -2562,7 +2643,7 @@ ${waReplyLink}
           <!-- Direct WhatsApp Contact Button -->
           <div style="text-align:center; padding-top:6px;">
             <a href="https://wa.me/923275226107?text=${encodeURIComponent(`Hello Safiullah! I received my booking confirmation (${newBooking.id}) for ${newBooking.serviceRequired}.`)}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
-              💬 Chat with Technician on WhatsApp (0327 5226107)
+              \u{1F4AC} Chat with Technician on WhatsApp (0327 5226107)
             </a>
           </div>
 
@@ -2570,23 +2651,22 @@ ${waReplyLink}
 
         <!-- Footer -->
         <div style="background-color:#090d16; padding:18px 24px; text-align:center; border-top:1px solid #1e293b; font-size:12px; color:#64748b;">
-          TechFix On-Site Computer Repair & IT Support • Peshawar, KP • Helpline: +92 327 5226107
+          TechFix On-Site Computer Repair & IT Support \u2022 Peshawar, KP \u2022 Helpline: +92 327 5226107
         </div>
 
       </div>
     </body>
     </html>
     `;
-
     const customerConfirmationText = `
-TechFix Peshawar • Booking Confirmation
+TechFix Peshawar \u2022 Booking Confirmation
 Tracking ID: ${newBooking.id}
 
 Hello ${newBooking.fullName},
 We have received your service request for: ${newBooking.serviceRequired}.
 
 Details:
-- Device: ${newBooking.deviceType} ${newBooking.computerBrandModel || ''}
+- Device: ${newBooking.deviceType} ${newBooking.computerBrandModel || ""}
 - Area: ${newBooking.area} (Peshawar)
 - Preferred Slot: ${newBooking.preferredDate} (${newBooking.preferredTime})
 - Data Safety: ${newBooking.containsImportantData}
@@ -2595,68 +2675,57 @@ Details:
 Our technician (Safiullah) will contact you at ${newBooking.phone} shortly to confirm the appointment.
 Helpline / WhatsApp: +92 327 5226107
     `.trim();
-
-    // Dispatch customer receipt email (unsuppressed per production requirement)
     dispatchEmail({
       to: newBooking.email,
-      subject: `TechFix Peshawar • Service Request Received (${newBooking.id})`,
+      subject: `TechFix Peshawar \u2022 Service Request Received (${newBooking.id})`,
       html: customerConfirmationHtml,
       text: customerConfirmationText
-    }).then(result => {
+    }).then((result) => {
       console.log(`[CUSTOMER RECEIPT EMAIL] Dispatched to ${newBooking.email}: delivered=${result.delivered}`);
-    }).catch(err => {
-      console.error('[CUSTOMER RECEIPT EMAIL] Dispatch error:', err);
+    }).catch((err) => {
+      console.error("[CUSTOMER RECEIPT EMAIL] Dispatch error:", err);
     });
   }
-
   db.activityLogs.unshift({
     id: `log-email-${Date.now()}`,
     action: "Email Notification Sent",
-    details: `Immediate notification dispatched to ${NOTIFICATION_DESTINATION} for request ${newBooking.id} (${newBooking.fullName})${newBooking.email ? ` & confirmation sent to customer (${newBooking.email})` : ''}`,
-    timestamp: new Date().toISOString(),
+    details: `Immediate notification dispatched to ${NOTIFICATION_DESTINATION} for request ${newBooking.id} (${newBooking.fullName})${newBooking.email ? ` & confirmation sent to customer (${newBooking.email})` : ""}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "System Notification Trigger"
   });
-
   saveDb();
-
   res.status(201).json({
     success: true,
     booking: newBooking,
     message: "Your request has been received. We will contact you to discuss the problem and confirm an appointment."
   });
 });
-
-// Endpoint to send/relay email notifications to techfixpeshawar@gmail.com
-app.post('/api/notify-email', async (req, res) => {
+app.post("/api/notify-email", async (req, res) => {
   const { recipient, subject, bodyText, payload } = req.body;
   const targetEmail = recipient || NOTIFICATION_DESTINATION;
-
   const result = await dispatchEmail({
     to: targetEmail,
-    subject: subject || `New PC Service Alert: ${payload?.customer_name || 'Customer'}`,
+    subject: subject || `New PC Service Alert: ${payload?.customer_name || "Customer"}`,
     text: bodyText || JSON.stringify(payload, null, 2)
   });
-
   db.activityLogs.unshift({
     id: `log-email-${Date.now()}`,
     action: "Email Notification Dispatched",
-    details: `Alert dispatched to ${targetEmail} for ${payload?.customer_name || 'Customer'} (${payload?.service_required || 'PC Repair'})`,
-    timestamp: new Date().toISOString(),
+    details: `Alert dispatched to ${targetEmail} for ${payload?.customer_name || "Customer"} (${payload?.service_required || "PC Repair"})`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Notification Trigger"
   });
   if (db.activityLogs.length > 100) db.activityLogs.pop();
   saveDb();
-
   if (!result.delivered) {
     return res.status(502).json({
       success: false,
       delivered: false,
       recipient: targetEmail,
       error: result.error || "Email notification delivery failed",
-      message: `Failed to dispatch notification to ${targetEmail}: ${result.error || 'Check email settings'}`
+      message: `Failed to dispatch notification to ${targetEmail}: ${result.error || "Check email settings"}`
     });
   }
-
   res.json({
     success: true,
     recipient: targetEmail,
@@ -2664,27 +2733,22 @@ app.post('/api/notify-email', async (req, res) => {
     message: `Immediate notification logged and dispatched to ${targetEmail}`
   });
 });
-
-// Public Client Query / Inquiry Submission (supports both /api/inquiries and /api/contact)
-async function handleInquirySubmission(req: express.Request, res: express.Response) {
+async function handleInquirySubmission(req, res) {
   const { fullName, phone, email, whatsapp, subject, service, budget, message, area } = req.body;
-
   if (!fullName || !phone || !message) {
     return res.status(400).json({ error: "Please provide your Full Name, Phone Number, and Message/Query." });
   }
-
   const cleanPhone = String(phone).trim();
   const cleanFullName = String(fullName).trim();
-  const cleanEmail = email ? String(email).trim() : '';
+  const cleanEmail = email ? String(email).trim() : "";
   const cleanWhatsapp = whatsapp ? String(whatsapp).trim() : cleanPhone;
-  const cleanArea = area ? String(area).trim() : 'Peshawar';
-  const cleanSubject = String(subject || service || 'General Computer Service Inquiry').trim();
-  const cleanService = String(service || subject || 'Computer Diagnostics & Repair').trim();
-  const cleanBudget = budget ? String(budget).trim() : '';
+  const cleanArea = area ? String(area).trim() : "Peshawar";
+  const cleanSubject = String(subject || service || "General Computer Service Inquiry").trim();
+  const cleanService = String(service || subject || "Computer Diagnostics & Repair").trim();
+  const cleanBudget = budget ? String(budget).trim() : "";
   const cleanMessage = String(message).trim();
-
-  const newInquiry: any = {
-    id: `INQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+  const newInquiry = {
+    id: `INQ-${Date.now()}-${Math.floor(Math.random() * 1e3)}`,
     fullName: cleanFullName,
     phone: cleanPhone,
     email: cleanEmail,
@@ -2694,15 +2758,13 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
     service: cleanService,
     budget: cleanBudget,
     message: cleanMessage,
-    status: 'NEW',
-    createdAt: new Date().toISOString(),
-    emailNotificationStatus: 'credentials_pending',
+    status: "NEW",
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    emailNotificationStatus: "credentials_pending",
     emailNotificationSentTo: NOTIFICATION_DESTINATION,
-    emailNotificationSentAt: new Date().toISOString(),
-    emailNotificationProvider: 'logged'
+    emailNotificationSentAt: (/* @__PURE__ */ new Date()).toISOString(),
+    emailNotificationProvider: "logged"
   };
-
-  // Generate branded HTML and text emails
   const html = generateBrandedEmailHtml({
     clientName: newInquiry.fullName,
     email: newInquiry.email,
@@ -2714,7 +2776,6 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
     message: newInquiry.message,
     area: newInquiry.area
   });
-
   const text = generateBrandedEmailText({
     clientName: newInquiry.fullName,
     email: newInquiry.email,
@@ -2725,8 +2786,6 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
     message: newInquiry.message,
     area: newInquiry.area
   });
-
-  // Execute Multi-Provider Waterfall
   const emailResult = await sendNotificationEmail({
     to: NOTIFICATION_DESTINATION,
     subject: `[LEAD INQUIRY] ${newInquiry.fullName} - ${newInquiry.subject} (${newInquiry.area}) - ${getPeshawarShortTimeString()}`,
@@ -2734,8 +2793,6 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
     text,
     lead: newInquiry
   });
-
-  // Update Telemetry on Inquiry Record
   newInquiry.emailNotificationStatus = emailResult.status;
   newInquiry.emailNotificationSentTo = emailResult.sentTo;
   newInquiry.emailNotificationSentAt = emailResult.sentAt;
@@ -2743,25 +2800,20 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
   if (emailResult.error) {
     newInquiry.emailNotificationError = emailResult.error;
   }
-
-  // Persist into database
   if (!Array.isArray(db.inquiries)) {
     db.inquiries = [];
   }
   db.inquiries.unshift(newInquiry);
-
-  // Save inquiry to Firestore collection 'inquiries' via Firebase Admin SDK
   try {
     const adminDb = getAdminFirestore();
-    adminDb.collection('inquiries').doc(newInquiry.id).set(newInquiry).then(() => {
-      console.log(`[FIRESTORE] ✅ Inquiry ${newInquiry.id} saved to Firestore`);
-    }).catch(err => {
-      console.error('[FIRESTORE] ❌ Inquiry save failed:', err);
+    adminDb.collection("inquiries").doc(newInquiry.id).set(newInquiry).then(() => {
+      console.log(`[FIRESTORE] \u2705 Inquiry ${newInquiry.id} saved to Firestore`);
+    }).catch((err) => {
+      console.error("[FIRESTORE] \u274C Inquiry save failed:", err);
     });
-  } catch (_) {}
-
-  // Sync customer profile
-  const existingCustomer = db.customers.find((c: any) => c.phone === newInquiry.phone);
+  } catch (_) {
+  }
+  const existingCustomer = db.customers.find((c) => c.phone === newInquiry.phone);
   if (!existingCustomer) {
     db.customers.unshift({
       id: `CUST-${Date.now()}`,
@@ -2771,54 +2823,41 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
       area: newInquiry.area,
       totalBookings: 0,
       totalSpent: "Rs. 0",
-      lastServiceDate: new Date().toISOString().split('T')[0],
+      lastServiceDate: (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
       notes: `Lead Inquiry: ${newInquiry.subject}`,
       devices: []
     });
   }
-
-  // Activity Log
   db.activityLogs.unshift({
     id: `log-inq-${Date.now()}`,
     action: "Lead Inquiry Received",
     details: `${newInquiry.fullName} submitted inquiry ("${newInquiry.subject}"). Email: ${emailResult.status.toUpperCase()} via ${emailResult.provider.toUpperCase()} to ${emailResult.sentTo}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Client (Online)"
   });
   if (db.activityLogs.length > 100) db.activityLogs.pop();
-
   saveDb();
-
   return res.status(201).json({
     success: true,
     inquiry: newInquiry,
     delivery: emailResult,
-    message: emailResult.status === 'sent'
-      ? `Thank you! Your inquiry has been received and emailed to the site administrator at ${emailResult.sentTo}.`
-      : `Thank you! Your inquiry has been recorded and received. We will contact you shortly.`
+    message: emailResult.status === "sent" ? `Thank you! Your inquiry has been received and emailed to the site administrator at ${emailResult.sentTo}.` : `Thank you! Your inquiry has been recorded and received. We will contact you shortly.`
   });
 }
-
-// POST endpoints for contact form
-app.post('/api/inquiries', publicApiRateLimiter, handleInquirySubmission);
-app.post('/api/contact', publicApiRateLimiter, handleInquirySubmission);
-
-// GET endpoints to list inquiries
-app.get('/api/inquiries', (req, res) => {
+app.post("/api/inquiries", publicApiRateLimiter, handleInquirySubmission);
+app.post("/api/contact", publicApiRateLimiter, handleInquirySubmission);
+app.get("/api/inquiries", (req, res) => {
   res.json({ inquiries: db.inquiries || [] });
 });
-app.get('/api/contact', (req, res) => {
+app.get("/api/contact", (req, res) => {
   res.json({ inquiries: db.inquiries || [] });
 });
-
-// POST endpoint to re-dispatch email notification for an inquiry
-async function handleResendInquiryEmail(req: express.Request, res: express.Response) {
+async function handleResendInquiryEmail(req, res) {
   const { id } = req.params;
-  const inquiry: any = (db.inquiries || []).find((inq: any) => inq.id === id);
+  const inquiry = (db.inquiries || []).find((inq) => inq.id === id);
   if (!inquiry) {
     return res.status(404).json({ error: "Inquiry not found" });
   }
-
   const html = generateBrandedEmailHtml({
     clientName: inquiry.fullName,
     email: inquiry.email,
@@ -2830,7 +2869,6 @@ async function handleResendInquiryEmail(req: express.Request, res: express.Respo
     message: inquiry.message,
     area: inquiry.area
   });
-
   const text = generateBrandedEmailText({
     clientName: inquiry.fullName,
     email: inquiry.email,
@@ -2841,7 +2879,6 @@ async function handleResendInquiryEmail(req: express.Request, res: express.Respo
     message: inquiry.message,
     area: inquiry.area
   });
-
   const emailResult = await sendNotificationEmail({
     to: NOTIFICATION_DESTINATION,
     subject: `[RESENT INQUIRY] ${inquiry.fullName} - ${inquiry.subject} (${inquiry.area}) - ${getPeshawarShortTimeString()}`,
@@ -2849,111 +2886,83 @@ async function handleResendInquiryEmail(req: express.Request, res: express.Respo
     text,
     lead: inquiry
   });
-
-  // Update telemetry
   inquiry.emailNotificationStatus = emailResult.status;
   inquiry.emailNotificationSentTo = emailResult.sentTo;
   inquiry.emailNotificationSentAt = emailResult.sentAt;
   inquiry.emailNotificationProvider = emailResult.provider;
-  inquiry.emailNotificationError = emailResult.error || undefined;
-
+  inquiry.emailNotificationError = emailResult.error || void 0;
   db.activityLogs.unshift({
     id: `log-resend-${Date.now()}`,
     action: "Inquiry Email Resent",
     details: `Manual email resend for inquiry ${inquiry.id} (${inquiry.fullName}). Result: ${emailResult.status.toUpperCase()} via ${emailResult.provider.toUpperCase()} to ${emailResult.sentTo}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
   if (db.activityLogs.length > 100) db.activityLogs.pop();
-
   saveDb();
-
   return res.json({
     success: true,
     inquiry,
     delivery: emailResult,
-    message: emailResult.status === 'sent'
-      ? `Email notification re-sent successfully to ${emailResult.sentTo} via ${emailResult.provider.toUpperCase()}!`
-      : `Email dispatch attempted with status: ${emailResult.status} (${emailResult.provider}).`
+    message: emailResult.status === "sent" ? `Email notification re-sent successfully to ${emailResult.sentTo} via ${emailResult.provider.toUpperCase()}!` : `Email dispatch attempted with status: ${emailResult.status} (${emailResult.provider}).`
   });
 }
-
-app.post('/api/inquiries/:id/resend-email', handleResendInquiryEmail);
-app.post('/api/contact/:id/resend-email', handleResendInquiryEmail);
-
-// PATCH endpoint to update inquiry status
-app.patch('/api/inquiries/:id', (req, res) => {
+app.post("/api/inquiries/:id/resend-email", handleResendInquiryEmail);
+app.post("/api/contact/:id/resend-email", handleResendInquiryEmail);
+app.patch("/api/inquiries/:id", (req, res) => {
   const { id } = req.params;
   const { status, notes } = req.body;
-  const inquiry: any = (db.inquiries || []).find((inq: any) => inq.id === id);
+  const inquiry = (db.inquiries || []).find((inq) => inq.id === id);
   if (!inquiry) {
     return res.status(404).json({ error: "Inquiry not found" });
   }
-
   if (status) inquiry.status = status;
-  if (notes !== undefined) inquiry.adminNotes = notes;
-  inquiry.updatedAt = new Date().toISOString();
-
+  if (notes !== void 0) inquiry.adminNotes = notes;
+  inquiry.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
   saveDb();
   res.json({ success: true, inquiry });
 });
-
-// DELETE endpoint to remove an inquiry (handles both /api/inquiries and /api/admin/inquiries)
-const handleDeleteInquiry = (req: express.Request, res: express.Response) => {
-  const rawId = req.params.id || '';
+var handleDeleteInquiry = (req, res) => {
+  const rawId = req.params.id || "";
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
-
-  const index = (db.inquiries || []).findIndex((inq: any) => 
-    inq.id === rawId || 
-    inq.id === decodedId || 
-    (inq.id && inq.id.trim().toLowerCase() === targetIdLower)
+  const index = (db.inquiries || []).findIndex(
+    (inq) => inq.id === rawId || inq.id === decodedId || inq.id && inq.id.trim().toLowerCase() === targetIdLower
   );
-
-  let removedItem: any = null;
+  let removedItem = null;
   if (index !== -1) {
     removedItem = db.inquiries.splice(index, 1)[0];
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action: "Lead Inquiry Deleted",
-      details: `Removed lead #${removedItem.id || decodedId} (${removedItem.fullName || 'Lead'})`,
-      timestamp: new Date().toISOString(),
+      details: `Removed lead #${removedItem.id || decodedId} (${removedItem.fullName || "Lead"})`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
   }
-
-  // Also remove any duplicate or case variations
-  db.inquiries = (db.inquiries || []).filter((inq: any) => 
-    inq.id !== rawId && 
-    inq.id !== decodedId && 
-    (!inq.id || inq.id.trim().toLowerCase() !== targetIdLower)
+  db.inquiries = (db.inquiries || []).filter(
+    (inq) => inq.id !== rawId && inq.id !== decodedId && (!inq.id || inq.id.trim().toLowerCase() !== targetIdLower)
   );
-
   saveDb();
-  res.json({ 
-    success: true, 
+  res.json({
+    success: true,
     removedId: removedItem?.id || decodedId,
-    message: "Lead inquiry deleted successfully" 
+    message: "Lead inquiry deleted successfully"
   });
 };
-
-app.delete('/api/inquiries/:id', handleDeleteInquiry);
-app.delete('/api/admin/inquiries/:id', checkAdminAuth, handleDeleteInquiry);
-
-// Admin Test Email Dispatch
-app.post('/api/admin/test-email', checkAdminAuth, async (req, res) => {
-  const targetEmail = (req.body?.email && req.body.email.trim()) || getNotificationDestination();
-  const customApiKey = (req.body?.resendApiKey && req.body.resendApiKey.trim()) || undefined;
-  const customFromEmail = (req.body?.resendFromEmail && req.body.resendFromEmail.trim()) || undefined;
-  const preferredProvider = req.body?.provider || (db?.settings as any)?.emailProvider || 'auto';
-  const gmailUser = req.body?.gmailUser || (db?.settings as any)?.gmailUser;
-  const gmailAppPassword = req.body?.gmailAppPassword || (db?.settings as any)?.gmailAppPassword;
-
+app.delete("/api/inquiries/:id", handleDeleteInquiry);
+app.delete("/api/admin/inquiries/:id", checkAdminAuth, handleDeleteInquiry);
+app.post("/api/admin/test-email", checkAdminAuth, async (req, res) => {
+  const targetEmail = req.body?.email && req.body.email.trim() || getNotificationDestination();
+  const customApiKey = req.body?.resendApiKey && req.body.resendApiKey.trim() || void 0;
+  const customFromEmail = req.body?.resendFromEmail && req.body.resendFromEmail.trim() || void 0;
+  const preferredProvider = req.body?.provider || db?.settings?.emailProvider || "auto";
+  const gmailUser = req.body?.gmailUser || db?.settings?.gmailUser;
+  const gmailAppPassword = req.body?.gmailAppPassword || db?.settings?.gmailAppPassword;
   const effectiveFrom = customFromEmail || getResendFromEmail();
   const effectiveApiKey = customApiKey || getResendApiKey();
   const pktShortTime = getPeshawarShortTimeString();
   const pktDateTime = getPeshawarDateTimeString();
-
   const testHtml = `
   <!DOCTYPE html>
   <html>
@@ -2961,7 +2970,7 @@ app.post('/api/admin/test-email', checkAdminAuth, async (req, res) => {
   <body style="margin:0; padding:20px; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#f8fafc;">
     <div style="max-width:550px; margin:0 auto; background-color:#0f172a; border-radius:12px; overflow:hidden; border:1px solid #1e293b; padding:28px; text-align:center;">
       <div style="display:inline-block; background-color:rgba(56, 189, 248, 0.1); color:#38bdf8; font-size:12px; font-weight:bold; padding:4px 12px; border-radius:9999px; margin-bottom:12px; border:1px solid rgba(56, 189, 248, 0.3);">
-        ✓ LIVE TEST DISPATCH
+        \u2713 LIVE TEST DISPATCH
       </div>
       <h2 style="color:#ffffff; margin:0 0 10px 0; font-size:22px;">TechFix Email Delivery Active</h2>
       <p style="color:#94a3b8; font-size:14px; line-height:1.6; margin-bottom:20px;">
@@ -2980,7 +2989,6 @@ app.post('/api/admin/test-email', checkAdminAuth, async (req, res) => {
   </body>
   </html>
   `;
-
   const result = await sendNotificationEmail({
     to: targetEmail,
     from: effectiveFrom,
@@ -2993,99 +3001,81 @@ app.post('/api/admin/test-email', checkAdminAuth, async (req, res) => {
     text: `TechFix Notification Test: Confirmed active delivery from ${effectiveFrom} to ${targetEmail} at ${pktDateTime} (PKT)`,
     lead: { fullName: "System Test", phone: "0300 0000000", message: "Live email delivery test." }
   });
-
-  // Log in activity logs for admin visibility
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
-    action: result.status === 'sent' ? "Email Test Delivered" : "Email Test Logged",
-    details: result.status === 'sent'
-      ? `Live verification email sent from "${effectiveFrom}" to ${targetEmail} via ${result.provider.toUpperCase()} (ID: ${result.messageId || 'ok'})`
-      : `Test notification status: ${result.status} (${result.provider}). Sender: ${effectiveFrom}. Error: ${result.error || 'none'}`,
-    timestamp: new Date().toISOString(),
+    action: result.status === "sent" ? "Email Test Delivered" : "Email Test Logged",
+    details: result.status === "sent" ? `Live verification email sent from "${effectiveFrom}" to ${targetEmail} via ${result.provider.toUpperCase()} (ID: ${result.messageId || "ok"})` : `Test notification status: ${result.status} (${result.provider}). Sender: ${effectiveFrom}. Error: ${result.error || "none"}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
   if (db.activityLogs.length > 100) db.activityLogs.pop();
   saveDb();
-
-  if (result.status !== 'sent') {
+  if (result.status !== "sent") {
     return res.status(502).json({
       success: false,
       delivered: false,
       recipient: targetEmail,
-      sender: result.provider === 'smtp' ? (gmailUser || 'techfixpeshawar@gmail.com') : effectiveFrom,
-      status: 'failed',
+      sender: result.provider === "smtp" ? gmailUser || "techfixpeshawar@gmail.com" : effectiveFrom,
+      status: "failed",
       provider: result.provider,
-      error: result.error || 'Email delivery failed across all configured providers',
+      error: result.error || "Email delivery failed across all configured providers",
       failoverNote: result.failoverNote
     });
   }
-
   return res.json({
     success: true,
     delivered: true,
     recipient: targetEmail,
-    sender: result.provider === 'smtp' ? (gmailUser || 'techfixpeshawar@gmail.com') : effectiveFrom,
-    status: 'sent',
+    sender: result.provider === "smtp" ? gmailUser || "techfixpeshawar@gmail.com" : effectiveFrom,
+    status: "sent",
     provider: result.provider,
     messageId: result.messageId,
     failoverNote: result.failoverNote,
-    message: `Live test email successfully delivered via ${result.provider.toUpperCase()} (ID: ${result.messageId || 'ok'})!`
+    message: `Live test email successfully delivered via ${result.provider.toUpperCase()} (ID: ${result.messageId || "ok"})!`
   });
 });
-
-// Admin Email Delivery Status check
-app.get('/api/admin/email-status', checkAdminAuth, (req, res) => {
+app.get("/api/admin/email-status", checkAdminAuth, (req, res) => {
   const activeKey = getResendApiKey();
   const isResend = !!activeKey;
-  const isGmail = !!(
-    ((db?.settings as any)?.gmailUser || process.env.GMAIL_USER || process.env.SMTP_USER) &&
-    ((db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS)
-  );
+  const isGmail = !!((db?.settings?.gmailUser || process.env.GMAIL_USER || process.env.SMTP_USER) && (db?.settings?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS));
   const isSmtp = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
   const isConfigured = isResend || isGmail || isSmtp;
-
   res.json({
     configured: isConfigured,
-    provider: (db?.settings as any)?.emailProvider || (isResend ? 'Resend API' : (isGmail ? 'Gmail App Password (Nodemailer SMTP)' : 'Not configured')),
+    provider: db?.settings?.emailProvider || (isResend ? "Resend API" : isGmail ? "Gmail App Password (Nodemailer SMTP)" : "Not configured"),
     destinationEmail: getNotificationDestination(),
     fromEmail: getResendFromEmail(),
-    emailProvider: (db?.settings as any)?.emailProvider || 'auto',
-    gmailUser: (db?.settings as any)?.gmailUser || process.env.GMAIL_USER || '',
-    hasGmailAppPassword: !!((db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD),
+    emailProvider: db?.settings?.emailProvider || "auto",
+    gmailUser: db?.settings?.gmailUser || process.env.GMAIL_USER || "",
+    hasGmailAppPassword: !!(db?.settings?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD),
     configuredVars: {
       hasResendKey: isResend,
       hasGmailUser: isGmail,
-      hasGmailAppPassword: !!((db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD),
+      hasGmailAppPassword: !!(db?.settings?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD),
       hasSmtpUser: !!process.env.SMTP_USER,
       hasSmtpPass: !!process.env.SMTP_PASS
     }
   });
 });
-
-// Booking, Problem Lead, and Inquiry lookup by ID or Phone
-app.get('/api/bookings/:id', (req, res) => {
-  const param = (req.params.id || '').toLowerCase().trim();
-  const cleanPhone = param.replace(/[^0-9]/g, '');
-
-  // 1. Direct booking lookup
-  const booking = db.bookings.find((b: any) => {
+app.get("/api/bookings/:id", (req, res) => {
+  const param = (req.params.id || "").toLowerCase().trim();
+  const cleanPhone = param.replace(/[^0-9]/g, "");
+  const booking = db.bookings.find((b) => {
     if (b.id.toLowerCase() === param) return true;
     if (cleanPhone.length >= 7) {
-      const bPhone = (b.phone || '').replace(/[^0-9]/g, '');
-      const bWa = (b.whatsapp || '').replace(/[^0-9]/g, '');
+      const bPhone = (b.phone || "").replace(/[^0-9]/g, "");
+      const bWa = (b.whatsapp || "").replace(/[^0-9]/g, "");
       if (bPhone && (bPhone === cleanPhone || bPhone.endsWith(cleanPhone) || cleanPhone.endsWith(bPhone))) return true;
       if (bWa && (bWa === cleanPhone || bWa.endsWith(cleanPhone) || cleanPhone.endsWith(bWa))) return true;
     }
     return false;
   });
   if (booking) return res.json({ booking });
-
-  // 2. Problem Lead lookup (supports LEAD-PRB-*)
-  const lead = (db.problemLeads || []).find((l: any) => {
+  const lead = (db.problemLeads || []).find((l) => {
     if (l.id && l.id.toLowerCase() === param) return true;
     if (cleanPhone.length >= 7) {
-      const lPhone = (l.phone || '').replace(/[^0-9]/g, '');
-      const lWa = (l.whatsapp || '').replace(/[^0-9]/g, '');
+      const lPhone = (l.phone || "").replace(/[^0-9]/g, "");
+      const lWa = (l.whatsapp || "").replace(/[^0-9]/g, "");
       if (lPhone && (lPhone === cleanPhone || lPhone.endsWith(cleanPhone) || cleanPhone.endsWith(lPhone))) return true;
       if (lWa && (lWa === cleanPhone || lWa.endsWith(cleanPhone) || cleanPhone.endsWith(lWa))) return true;
     }
@@ -3098,27 +3088,25 @@ app.get('/api/bookings/:id', (req, res) => {
         fullName: lead.fullName,
         phone: lead.phone,
         whatsapp: lead.whatsapp || lead.phone,
-        area: lead.area || 'Peshawar',
-        deviceType: lead.deviceType || 'Laptop / Desktop',
-        computerBrandModel: lead.deviceType || '',
-        serviceRequired: lead.problemTitle || 'Problem Diagnosis & Research',
-        problemDescription: lead.problemDescription || '',
-        preferredDate: 'As soon as possible',
-        preferredTime: 'Standard Hours',
-        urgency: lead.urgency === 'urgent' ? 'Urgent' : 'Normal',
-        containsImportantData: 'NO',
-        status: (lead.status || 'NEW').toUpperCase(),
+        area: lead.area || "Peshawar",
+        deviceType: lead.deviceType || "Laptop / Desktop",
+        computerBrandModel: lead.deviceType || "",
+        serviceRequired: lead.problemTitle || "Problem Diagnosis & Research",
+        problemDescription: lead.problemDescription || "",
+        preferredDate: "As soon as possible",
+        preferredTime: "Standard Hours",
+        urgency: lead.urgency === "urgent" ? "Urgent" : "Normal",
+        containsImportantData: "NO",
+        status: (lead.status || "NEW").toUpperCase(),
         createdAt: lead.createdAt,
-        technicianNotes: lead.technicianNotes || ''
+        technicianNotes: lead.technicianNotes || ""
       }
     });
   }
-
-  // 3. General Inquiry lookup (supports INQ-*)
-  const inq = (db.inquiries || []).find((i: any) => {
+  const inq = (db.inquiries || []).find((i) => {
     if (i.id && i.id.toLowerCase() === param) return true;
     if (cleanPhone.length >= 7) {
-      const iPhone = (i.phone || '').replace(/[^0-9]/g, '');
+      const iPhone = (i.phone || "").replace(/[^0-9]/g, "");
       if (iPhone && (iPhone === cleanPhone || iPhone.endsWith(cleanPhone) || cleanPhone.endsWith(iPhone))) return true;
     }
     return false;
@@ -3127,85 +3115,66 @@ app.get('/api/bookings/:id', (req, res) => {
     return res.json({
       booking: {
         id: inq.id,
-        fullName: inq.fullName || inq.name || 'Customer',
+        fullName: inq.fullName || inq.name || "Customer",
         phone: inq.phone,
         whatsapp: inq.whatsapp || inq.phone,
-        area: inq.area || 'Peshawar',
-        deviceType: 'Computer System',
-        serviceRequired: inq.service || inq.subject || 'General Technical Inquiry',
-        problemDescription: inq.message || inq.notes || '',
-        preferredDate: 'Pending Discussion',
-        preferredTime: 'Pending Discussion',
-        urgency: 'Normal',
-        containsImportantData: 'NO',
-        status: (inq.status || 'NEW').toUpperCase(),
+        area: inq.area || "Peshawar",
+        deviceType: "Computer System",
+        serviceRequired: inq.service || inq.subject || "General Technical Inquiry",
+        problemDescription: inq.message || inq.notes || "",
+        preferredDate: "Pending Discussion",
+        preferredTime: "Pending Discussion",
+        urgency: "Normal",
+        containsImportantData: "NO",
+        status: (inq.status || "NEW").toUpperCase(),
         createdAt: inq.createdAt
       }
     });
   }
-
   return res.status(404).json({ error: "Booking or request not found." });
 });
-
-// Admin Auth
-const ADMIN_SECRET = (process.env.ADMIN_SECRET || process.env.ADMIN_PASSWORD || '').trim();
-let customAdminPassword: string | null = null;
-
-const AUTHORIZED_ADMIN_EMAILS = new Set([
-  'techfixpeshawar@gmail.com',
-  'sullahjan40@gmail.com',
-  'admin@peshawar-techsupport.pk'
+var ADMIN_SECRET = (process.env.ADMIN_SECRET || process.env.ADMIN_PASSWORD || "").trim();
+var customAdminPassword = null;
+var AUTHORIZED_ADMIN_EMAILS = /* @__PURE__ */ new Set([
+  "techfixpeshawar@gmail.com",
+  "sullahjan40@gmail.com",
+  "admin@peshawar-techsupport.pk"
 ]);
-
-app.post('/api/admin/login', authRateLimiter, async (req, res) => {
+app.post("/api/admin/login", authRateLimiter, async (req, res) => {
   const { password, idToken, email } = req.body;
-
-  // 1. If Firebase ID Token is passed, verify it (Admin SDK or REST fallback)
-  if (idToken && typeof idToken === 'string') {
+  if (idToken && typeof idToken === "string") {
     const emailFromToken = await verifyFirebaseIdTokenFallback(idToken);
     if (emailFromToken && AUTHORIZED_ADMIN_EMAILS.has(emailFromToken.toLowerCase())) {
       const sessionToken = generateAdminSessionToken(emailFromToken);
       return res.json({ success: true, token: sessionToken });
     }
-
-    // Also try Firebase Admin SDK (works when service account / ADC is available)
     try {
       const adminAuth = getFirebaseAdminAuthInstance();
       if (adminAuth) {
         const decoded = await adminAuth.verifyIdToken(idToken);
-        const emailLower = (decoded?.email || '').toLowerCase();
-        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === 'admin')) {
-          const sessionToken = generateAdminSessionToken(decoded.email || 'admin');
+        const emailLower = (decoded?.email || "").toLowerCase();
+        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === "admin")) {
+          const sessionToken = generateAdminSessionToken(decoded.email || "admin");
           return res.json({ success: true, token: sessionToken });
         }
       }
     } catch (tokenErr) {
-      console.warn('[AUTH] Firebase Admin token verify note:', (tokenErr as any)?.message);
+      console.warn("[AUTH] Firebase Admin token verify note:", tokenErr?.message);
     }
-
-    // ID token was provided but could not be verified — reject early
     return res.status(401).json({ error: "Invalid or expired Firebase session. Please sign in again." });
   }
-
-  // 2. Verify admin credentials against active configuration
-  const p = (password || '').toString().trim();
-  const currentSavedPassword = (db?.settings as any)?.adminPassword;
-  const isValidPassword = 
-    (customAdminPassword && p === customAdminPassword) ||
-    (currentSavedPassword && p === currentSavedPassword) ||
-    (ADMIN_SECRET && p === ADMIN_SECRET);
-
+  const p = (password || "").toString().trim();
+  const currentSavedPassword = db?.settings?.adminPassword;
+  const isValidPassword = customAdminPassword && p === customAdminPassword || currentSavedPassword && p === currentSavedPassword || ADMIN_SECRET && p === ADMIN_SECRET;
   if (p && isValidPassword) {
-    const sessionToken = generateAdminSessionToken(email || 'admin');
+    const sessionToken = generateAdminSessionToken(email || "admin");
     return res.json({ success: true, token: sessionToken });
   }
-
   return res.status(401).json({ error: "Invalid admin credentials." });
 });
-
-app.post('/api/admin/change-password', checkAdminAuth, async (req, res) => {
+app.post("/api/admin/change-password", checkAdminAuth, async (req, res) => {
   const { newPassword } = req.body;
-  if (!newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 6) {
+  if (!newPassword || typeof newPassword !== "string" || newPassword.trim().length < 6) {
     return res.status(400).json({ error: "Password must be at least 6 characters long." });
   }
   customAdminPassword = newPassword.trim();
@@ -3216,87 +3185,71 @@ app.post('/api/admin/change-password', checkAdminAuth, async (req, res) => {
   }
   return res.json({ success: true, message: "Admin password updated and synced successfully." });
 });
-
-async function checkAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+async function checkAdminAuth(req, res, next) {
   const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : null;
-  const customHeader = (req.headers['x-admin-token'] as string || '').trim();
+  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+  const customHeader = (req.headers["x-admin-token"] || "").trim();
   const validToken = token || customHeader;
-
   if (!validToken) {
     return res.status(401).json({ error: "Unauthorized. Valid admin session token required." });
   }
-
-  // 1. Verify cryptographic HMAC session token
-  if (validToken.startsWith('techfix_sess_') && verifyAdminSessionToken(validToken)) {
+  if (validToken.startsWith("techfix_sess_") && verifyAdminSessionToken(validToken)) {
     return next();
   }
-
-  // 2. Verify Firebase Auth ID Token if passed as Bearer token
-  if (validToken.split('.').length === 3) {
+  if (validToken.split(".").length === 3) {
     const emailFromToken = await verifyFirebaseIdTokenFallback(validToken);
     if (emailFromToken && AUTHORIZED_ADMIN_EMAILS.has(emailFromToken.toLowerCase())) {
       return next();
     }
-
     try {
       const adminAuth = getFirebaseAdminAuthInstance();
       if (adminAuth) {
         const decoded = await adminAuth.verifyIdToken(validToken);
-        const emailLower = (decoded?.email || '').toLowerCase();
-        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === 'admin')) {
+        const emailLower = (decoded?.email || "").toLowerCase();
+        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === "admin")) {
           return next();
         }
       }
     } catch {
-      // Token verification failed or expired
     }
   }
-
   return res.status(401).json({ error: "Unauthorized. Valid admin session token required." });
 }
-
-// Admin full data — reads Firestore collections first so Vercel always shows latest saved state
-app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
+app.get("/api/admin/data", checkAdminAuth, async (req, res) => {
   try {
     const adminDb = getAdminFirestore();
     const [firestoreSettings, safeEmail, bookingsSnap, inquiriesSnap] = await Promise.all([
       loadSettingsFromFirestore().catch(() => null),
       getSafeEmailSettings().catch(() => null),
-      adminDb.collection('bookings').get().catch(() => null),
-      adminDb.collection('inquiries').get().catch(() => null),
+      adminDb.collection("bookings").get().catch(() => null),
+      adminDb.collection("inquiries").get().catch(() => null)
     ]);
-
-    if (firestoreSettings && typeof firestoreSettings === 'object') {
+    if (firestoreSettings && typeof firestoreSettings === "object") {
       db.settings = { ...db.settings, ...firestoreSettings };
     }
-
     if (bookingsSnap && !bookingsSnap.empty) {
-      const fsBookings = bookingsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      const idMap = new Map();
-      (db.bookings || []).forEach((b: any) => idMap.set(b.id, b));
-      fsBookings.forEach((b: any) => idMap.set(b.id, b));
+      const fsBookings = bookingsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const idMap = /* @__PURE__ */ new Map();
+      (db.bookings || []).forEach((b) => idMap.set(b.id, b));
+      fsBookings.forEach((b) => idMap.set(b.id, b));
       db.bookings = Array.from(idMap.values());
     }
-
     if (inquiriesSnap && !inquiriesSnap.empty) {
-      const fsInquiries = inquiriesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      const idMap = new Map();
-      (db.inquiries || []).forEach((i: any) => idMap.set(i.id, i));
-      fsInquiries.forEach((i: any) => idMap.set(i.id, i));
+      const fsInquiries = inquiriesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const idMap = /* @__PURE__ */ new Map();
+      (db.inquiries || []).forEach((i) => idMap.set(i.id, i));
+      fsInquiries.forEach((i) => idMap.set(i.id, i));
       db.inquiries = Array.from(idMap.values());
     }
-
     const sanitizedSettings = {
       ...db.settings,
-      ...(safeEmail || {})
+      ...safeEmail || {}
     };
-    delete (sanitizedSettings as any).resendApiKey;
-    delete (sanitizedSettings as any).gmailAppPassword;
-    delete (sanitizedSettings as any).smtpPassword;
-    delete (sanitizedSettings as any).adminPassword;
-    delete (sanitizedSettings as any).apiSecret;
-
+    delete sanitizedSettings.resendApiKey;
+    delete sanitizedSettings.gmailAppPassword;
+    delete sanitizedSettings.smtpPassword;
+    delete sanitizedSettings.adminPassword;
+    delete sanitizedSettings.apiSecret;
     return res.json({
       settings: sanitizedSettings,
       services: db.services,
@@ -3314,525 +3267,438 @@ app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
       problemSolutions: db.problemSolutions || [],
       problemLeads: db.problemLeads || []
     });
-  } catch (err: any) {
-    console.error('[FIRESTORE] Admin data GET error:', err);
+  } catch (err) {
+    console.error("[FIRESTORE] Admin data GET error:", err);
     return res.status(500).json({ error: "Failed to load admin dashboard data" });
   }
 });
-
-// ----------------- PAGE SECTIONS & CONTENT CMS API -----------------
-
-// Update whole section or page metadata (title, subtitle, badge)
-app.put('/api/admin/page-sections/:sectionKey', checkAdminAuth, (req, res) => {
+app.put("/api/admin/page-sections/:sectionKey", checkAdminAuth, (req, res) => {
   const { sectionKey } = req.params;
   const updates = req.body;
   if (!db.pageSections) {
     db.pageSections = { ...defaultData.pageSections };
   }
-  
-  const currentSection = (db.pageSections as any)[sectionKey] || {};
-  (db.pageSections as any)[sectionKey] = {
+  const currentSection = db.pageSections[sectionKey] || {};
+  db.pageSections[sectionKey] = {
     ...currentSection,
     ...updates
   };
-
   if (updates.pageStatus && db.pageSections.pageStatuses) {
     db.pageSections.pageStatuses[sectionKey] = updates.pageStatus;
   }
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Page Section Updated",
     details: `Updated content metadata for section: ${sectionKey}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-  res.json({ success: true, section: (db.pageSections as any)[sectionKey], pageSections: db.pageSections });
+  res.json({ success: true, section: db.pageSections[sectionKey], pageSections: db.pageSections });
 });
-
-// Toggle page publish status (published / unpublished)
-app.put('/api/admin/page-status/:sectionKey', checkAdminAuth, (req, res) => {
+app.put("/api/admin/page-status/:sectionKey", checkAdminAuth, (req, res) => {
   const { sectionKey } = req.params;
   const { status } = req.body;
   if (!db.pageSections) {
     db.pageSections = { ...defaultData.pageSections };
   }
   if (!db.pageSections.pageStatuses) {
-    db.pageSections.pageStatuses = { ...(defaultData.pageSections?.pageStatuses || {}) } as any;
+    db.pageSections.pageStatuses = { ...defaultData.pageSections?.pageStatuses || {} };
   }
-
-  const newStatus = status === 'unpublished' ? 'unpublished' : 'published';
+  const newStatus = status === "unpublished" ? "unpublished" : "published";
   db.pageSections.pageStatuses[sectionKey] = newStatus;
-
-  if ((db.pageSections as any)[sectionKey]) {
-    (db.pageSections as any)[sectionKey].pageStatus = newStatus;
+  if (db.pageSections[sectionKey]) {
+    db.pageSections[sectionKey].pageStatus = newStatus;
   }
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
-    action: newStatus === 'published' ? "Page Published" : "Page Unpublished",
+    action: newStatus === "published" ? "Page Published" : "Page Unpublished",
     details: `Page [${sectionKey}] is now ${newStatus.toUpperCase()}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
   res.json({ success: true, sectionKey, status: newStatus, pageStatuses: db.pageSections.pageStatuses });
 });
-
-// Add new content item to a section's sub-collection
-app.post('/api/admin/page-sections/:sectionKey/:collectionKey', checkAdminAuth, (req, res) => {
+app.post("/api/admin/page-sections/:sectionKey/:collectionKey", checkAdminAuth, (req, res) => {
   const { sectionKey, collectionKey } = req.params;
   const itemData = req.body;
-
   if (!db.pageSections) {
     db.pageSections = { ...defaultData.pageSections };
   }
-  const section = (db.pageSections as any)[sectionKey];
+  const section = db.pageSections[sectionKey];
   if (!section) {
     return res.status(404).json({ error: `Section ${sectionKey} not found` });
   }
-
   if (!Array.isArray(section[collectionKey])) {
     section[collectionKey] = [];
   }
-
   const newItem = {
     id: `${sectionKey}-${Date.now().toString(36)}`,
     ...itemData,
-    status: itemData.status === 'unpublished' ? 'unpublished' : 'published'
+    status: itemData.status === "unpublished" ? "unpublished" : "published"
   };
-
   section[collectionKey].push(newItem);
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Content Item Created",
     details: `Added new item to ${sectionKey} > ${collectionKey}: "${newItem.title || newItem.name || newItem.id}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
   res.status(201).json({ success: true, item: newItem, collection: section[collectionKey] });
 });
-
-// Edit existing content item in a section's sub-collection
-app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, (req, res) => {
+app.put("/api/admin/page-sections/:sectionKey/:collectionKey/:itemId", checkAdminAuth, (req, res) => {
   const { sectionKey, collectionKey, itemId } = req.params;
   const updates = req.body;
-
   if (!db.pageSections) {
     db.pageSections = { ...defaultData.pageSections };
   }
-  const section = (db.pageSections as any)[sectionKey];
+  const section = db.pageSections[sectionKey];
   if (!section || !Array.isArray(section[collectionKey])) {
     return res.status(404).json({ error: `Collection ${collectionKey} in section ${sectionKey} not found` });
   }
-
-  const index = section[collectionKey].findIndex((i: any) => i.id === itemId);
+  const index = section[collectionKey].findIndex((i) => i.id === itemId);
   if (index === -1) {
     return res.status(404).json({ error: `Item ${itemId} not found` });
   }
-
   section[collectionKey][index] = {
     ...section[collectionKey][index],
     ...updates,
-    id: itemId // preserve ID
+    id: itemId
+    // preserve ID
   };
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Content Item Updated",
     details: `Updated item in ${sectionKey} > ${collectionKey}: "${section[collectionKey][index].title || itemId}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
   res.json({ success: true, item: section[collectionKey][index], collection: section[collectionKey] });
 });
-
-// Delete content item from a section's sub-collection
-app.delete('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, (req, res) => {
+app.delete("/api/admin/page-sections/:sectionKey/:collectionKey/:itemId", checkAdminAuth, (req, res) => {
   const { sectionKey, collectionKey, itemId } = req.params;
-
   if (!db.pageSections) {
     db.pageSections = { ...defaultData.pageSections };
   }
-  const section = (db.pageSections as any)[sectionKey];
+  const section = db.pageSections[sectionKey];
   if (!section || !Array.isArray(section[collectionKey])) {
     return res.status(404).json({ error: `Collection ${collectionKey} in section ${sectionKey} not found` });
   }
-
-  const index = section[collectionKey].findIndex((i: any) => i.id === itemId);
+  const index = section[collectionKey].findIndex((i) => i.id === itemId);
   if (index === -1) {
     return res.status(404).json({ error: `Item ${itemId} not found` });
   }
-
   const removed = section[collectionKey].splice(index, 1)[0];
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Content Item Deleted",
     details: `Deleted item from ${sectionKey} > ${collectionKey}: "${removed.title || itemId}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
   res.json({ success: true, removedId: itemId, collection: section[collectionKey] });
 });
-
-// Toggle content item published / unpublished status
-app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId/toggle', checkAdminAuth, (req, res) => {
+app.put("/api/admin/page-sections/:sectionKey/:collectionKey/:itemId/toggle", checkAdminAuth, (req, res) => {
   const { sectionKey, collectionKey, itemId } = req.params;
-
   if (!db.pageSections) {
     db.pageSections = { ...defaultData.pageSections };
   }
-  const section = (db.pageSections as any)[sectionKey];
+  const section = db.pageSections[sectionKey];
   if (!section || !Array.isArray(section[collectionKey])) {
     return res.status(404).json({ error: `Collection ${collectionKey} in section ${sectionKey} not found` });
   }
-
-  const index = section[collectionKey].findIndex((i: any) => i.id === itemId);
+  const index = section[collectionKey].findIndex((i) => i.id === itemId);
   if (index === -1) {
     return res.status(404).json({ error: `Item ${itemId} not found` });
   }
-
   const currentStatus = section[collectionKey][index].status;
-  const newStatus = (currentStatus === 'published' || currentStatus === 'active') ? 'unpublished' : 'published';
+  const newStatus = currentStatus === "published" || currentStatus === "active" ? "unpublished" : "published";
   section[collectionKey][index].status = newStatus;
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
-    action: newStatus === 'published' ? "Content Item Published" : "Content Item Unpublished",
+    action: newStatus === "published" ? "Content Item Published" : "Content Item Unpublished",
     details: `Item "${section[collectionKey][index].title || itemId}" in ${sectionKey} is now ${newStatus.toUpperCase()}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
   res.json({ success: true, item: section[collectionKey][index], newStatus });
 });
-
-// ----------------- SERVICES CRUD -----------------
-app.post('/api/admin/services', checkAdminAuth, (req, res) => {
+app.post("/api/admin/services", checkAdminAuth, (req, res) => {
   const { title, shortDesc, fullDesc, priceStarting, priceNote, turnaround, icon, customIcon, status, workflow, warningNote, diagnosticSteps } = req.body;
   if (!title) {
     return res.status(400).json({ error: "Service title is required" });
   }
-
   const newService = {
     id: `srv-${Date.now().toString(36)}`,
-    key: title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+    key: title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""),
     title: String(title).trim(),
-    shortDesc: String(shortDesc || '').trim(),
-    fullDesc: String(fullDesc || '').trim(),
-    priceStarting: String(priceStarting || 'From Rs. 1,000').trim(),
-    priceNote: String(priceNote || '').trim(),
-    turnaround: String(turnaround || '45 – 60 mins').trim(),
-    icon: icon || 'Wrench',
-    customIcon: customIcon || undefined,
-    status: status === 'inactive' ? 'inactive' : 'active',
+    shortDesc: String(shortDesc || "").trim(),
+    fullDesc: String(fullDesc || "").trim(),
+    priceStarting: String(priceStarting || "From Rs. 1,000").trim(),
+    priceNote: String(priceNote || "").trim(),
+    turnaround: String(turnaround || "45 \u2013 60 mins").trim(),
+    icon: icon || "Wrench",
+    customIcon: customIcon || void 0,
+    status: status === "inactive" ? "inactive" : "active",
     order: db.services.length + 1,
     workflow: Array.isArray(workflow) ? workflow : [],
-    warningNote: warningNote || undefined,
-    diagnosticSteps: Array.isArray(diagnosticSteps) ? diagnosticSteps : undefined
+    warningNote: warningNote || void 0,
+    diagnosticSteps: Array.isArray(diagnosticSteps) ? diagnosticSteps : void 0
   };
-
-  (db.services as any[]).push(newService);
+  db.services.push(newService);
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Service Created",
     details: `Created new service: "${newService.title}" with price ${newService.priceStarting}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-  syncDocToFirestore('services', newService.id, newService);
+  syncDocToFirestore("services", newService.id, newService);
   res.status(201).json({ success: true, service: newService });
 });
-
-app.put('/api/admin/services/:id', checkAdminAuth, (req, res) => {
+app.put("/api/admin/services/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  const index = db.services.findIndex((s: any) => s.id === id);
+  const index = db.services.findIndex((s) => s.id === id);
   if (index === -1) {
     return res.status(404).json({ error: "Service not found" });
   }
-
   db.services[index] = { ...db.services[index], ...req.body, id };
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Service Updated",
     details: `Updated service details: "${db.services[index].title}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-  syncDocToFirestore('services', id, db.services[index]);
+  syncDocToFirestore("services", id, db.services[index]);
   res.json({ success: true, service: db.services[index] });
 });
-
-app.delete('/api/admin/services/:id', checkAdminAuth, (req, res) => {
+app.delete("/api/admin/services/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  const item = db.services.find((s: any) => s.id === id || s.key === id);
+  const item = db.services.find((s) => s.id === id || s.key === id);
   if (!item) {
-    // If already deleted or not found, return success so frontend state stays clean
     return res.json({ success: true, message: "Item was already deleted" });
   }
-
-  db.services = db.services.filter((s: any) => s.id !== id && s.key !== id);
+  db.services = db.services.filter((s) => s.id !== id && s.key !== id);
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Service Deleted",
     details: `Deleted service: "${item.title}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-  deleteDocFromFirestore('services', id);
+  deleteDocFromFirestore("services", id);
   res.json({ success: true, deletedId: id });
 });
-
-const handleToggleService = (req: any, res: any) => {
+var handleToggleService = (req, res) => {
   const { id } = req.params;
-  const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
+  const index = db.services.findIndex((s) => s.id === id || s.key === id);
   if (index === -1) return res.status(404).json({ error: "Service not found" });
-
   const currentStatus = db.services[index].status;
-  const newStatus = (currentStatus === 'active' || currentStatus === 'published') ? 'inactive' : 'active';
+  const newStatus = currentStatus === "active" || currentStatus === "published" ? "inactive" : "active";
   db.services[index].status = newStatus;
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Service Status Toggled",
     details: `${db.services[index].title} is now ${newStatus.toUpperCase()}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-  syncDocToFirestore('services', id, db.services[index]);
+  syncDocToFirestore("services", id, db.services[index]);
   res.json({ success: true, service: db.services[index] });
 };
-
-app.put('/api/admin/services/:id/toggle', checkAdminAuth, handleToggleService);
-app.patch('/api/admin/services/:id/toggle', checkAdminAuth, handleToggleService);
-
-app.post('/api/admin/services/:id/publish', checkAdminAuth, (req, res) => {
+app.put("/api/admin/services/:id/toggle", checkAdminAuth, handleToggleService);
+app.patch("/api/admin/services/:id/toggle", checkAdminAuth, handleToggleService);
+app.post("/api/admin/services/:id/publish", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
+  const index = db.services.findIndex((s) => s.id === id || s.key === id);
   if (index === -1) return res.status(404).json({ error: "Service not found" });
-
-  db.services[index].status = 'active';
+  db.services[index].status = "active";
   saveDb();
-  syncDocToFirestore('services', id, db.services[index]);
+  syncDocToFirestore("services", id, db.services[index]);
   res.json({ success: true, service: db.services[index] });
 });
-
-app.post('/api/admin/services/:id/unpublish', checkAdminAuth, (req, res) => {
+app.post("/api/admin/services/:id/unpublish", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
+  const index = db.services.findIndex((s) => s.id === id || s.key === id);
   if (index === -1) return res.status(404).json({ error: "Service not found" });
-
-  db.services[index].status = 'inactive';
+  db.services[index].status = "inactive";
   saveDb();
-  syncDocToFirestore('services', id, db.services[index]);
+  syncDocToFirestore("services", id, db.services[index]);
   res.json({ success: true, service: db.services[index] });
 });
-
-app.post('/api/admin/services/reorder', checkAdminAuth, (req, res) => {
+app.post("/api/admin/services/reorder", checkAdminAuth, (req, res) => {
   const { serviceIds } = req.body;
   if (!Array.isArray(serviceIds)) {
     return res.status(400).json({ error: "serviceIds array required" });
   }
-
-  const reordered: any[] = [];
+  const reordered = [];
   serviceIds.forEach((id, idx) => {
-    const item = db.services.find((s: any) => s.id === id);
+    const item = db.services.find((s) => s.id === id);
     if (item) {
       item.order = idx + 1;
       reordered.push(item);
     }
   });
-
-  // add remaining
-  db.services.forEach((s: any) => {
-    if (!reordered.some(r => r.id === s.id)) {
+  db.services.forEach((s) => {
+    if (!reordered.some((r) => r.id === s.id)) {
       s.order = reordered.length + 1;
       reordered.push(s);
     }
   });
-
   db.services = reordered;
   saveDb();
-  reordered.forEach(s => syncDocToFirestore('services', s.id, s));
+  reordered.forEach((s) => syncDocToFirestore("services", s.id, s));
   res.json({ success: true, services: db.services });
 });
-
-app.put('/api/admin/services', checkAdminAuth, (req, res) => {
+app.put("/api/admin/services", checkAdminAuth, (req, res) => {
   const { services } = req.body;
   if (Array.isArray(services)) {
     db.services = services;
     saveDb();
-    services.forEach((s: any) => { if (s?.id) syncDocToFirestore('services', s.id, s); });
+    services.forEach((s) => {
+      if (s?.id) syncDocToFirestore("services", s.id, s);
+    });
     return res.json({ success: true, services: db.services });
   }
   res.status(400).json({ error: "Invalid services format" });
 });
-
-// ----------------- PROBLEM SOLUTIONS CRUD -----------------
-app.get('/api/problem-solutions', async (req, res) => {
+app.get("/api/problem-solutions", async (req, res) => {
   await firestoreReady;
-  const published = (db.problemSolutions || []).filter((p: any) => p.status !== 'unpublished');
+  const published = (db.problemSolutions || []).filter((p) => p.status !== "unpublished");
   res.json({ success: true, problemSolutions: published });
 });
-
-app.get('/api/admin/problem-solutions', checkAdminAuth, async (req, res) => {
+app.get("/api/admin/problem-solutions", checkAdminAuth, async (req, res) => {
   await firestoreReady;
   res.json({ success: true, problemSolutions: db.problemSolutions || [] });
 });
-
-app.post('/api/admin/problem-solutions', checkAdminAuth, async (req, res) => {
+app.post("/api/admin/problem-solutions", checkAdminAuth, async (req, res) => {
   const data = req.body;
   if (!data.title) return res.status(400).json({ error: "Title is required" });
-
   if (!Array.isArray(db.problemSolutions)) db.problemSolutions = [];
-
   const newItem = {
     id: `prob-${Date.now().toString(36)}`,
-    key: data.key || data.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
-    badge: data.badge || 'TECHNICAL SOLUTION',
+    key: data.key || data.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""),
+    badge: data.badge || "TECHNICAL SOLUTION",
     title: String(data.title).trim(),
-    subtitle: data.subtitle || '',
-    shortDesc: data.shortDesc || '',
+    subtitle: data.subtitle || "",
+    shortDesc: data.shortDesc || "",
     symptomsWhenNeeded: Array.isArray(data.symptomsWhenNeeded) ? data.symptomsWhenNeeded : [],
-    honestAssessment: data.honestAssessment || '',
-    turnaroundCriteria: data.turnaroundCriteria || '',
+    honestAssessment: data.honestAssessment || "",
+    turnaroundCriteria: data.turnaroundCriteria || "",
     turnaroundFactors: Array.isArray(data.turnaroundFactors) ? data.turnaroundFactors : [],
-    protocolBadge: data.protocolBadge || '',
-    protocolTitle: data.protocolTitle || '',
+    protocolBadge: data.protocolBadge || "",
+    protocolTitle: data.protocolTitle || "",
     steps: Array.isArray(data.steps) ? data.steps : [],
-    priceStarting: data.priceStarting || 'Contact for diagnosis',
-    ctaText: data.ctaText || 'Book Diagnosis',
-    serviceKey: data.serviceKey || '',
+    priceStarting: data.priceStarting || "Contact for diagnosis",
+    ctaText: data.ctaText || "Book Diagnosis",
+    serviceKey: data.serviceKey || "",
     warningRules: Array.isArray(data.warningRules) ? data.warningRules : [],
     recoverableScenarios: Array.isArray(data.recoverableScenarios) ? data.recoverableScenarios : [],
     unrecoverableScenarios: Array.isArray(data.unrecoverableScenarios) ? data.unrecoverableScenarios : [],
     benefits: Array.isArray(data.benefits) ? data.benefits : [],
-    status: data.status === 'unpublished' ? 'unpublished' : 'published',
+    status: data.status === "unpublished" ? "unpublished" : "published",
     order: db.problemSolutions.length + 1
   };
-
   db.problemSolutions.push(newItem);
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Problem Solution Created",
     details: `Created problem solution: "${newItem.title}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
   saveDb();
   await saveProblemSolutionsToFirestore(db.problemSolutions);
   res.status(201).json({ success: true, item: newItem });
 });
-
-app.put('/api/admin/problem-solutions/:id', checkAdminAuth, async (req, res) => {
+app.put("/api/admin/problem-solutions/:id", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
-  const index = (db.problemSolutions || []).findIndex((p: any) => p.id === id || p.key === id);
+  const index = (db.problemSolutions || []).findIndex((p) => p.id === id || p.key === id);
   if (index === -1) return res.status(404).json({ error: "Problem solution not found" });
-
   db.problemSolutions[index] = {
     ...db.problemSolutions[index],
     ...req.body,
     id: db.problemSolutions[index].id
   };
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Problem Solution Updated",
     details: `Updated problem solution: "${db.problemSolutions[index].title}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
   saveDb();
   await saveProblemSolutionsToFirestore(db.problemSolutions);
   res.json({ success: true, item: db.problemSolutions[index] });
 });
-
-app.delete('/api/admin/problem-solutions/:id', checkAdminAuth, async (req, res) => {
+app.delete("/api/admin/problem-solutions/:id", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
-  const index = (db.problemSolutions || []).findIndex((p: any) => p.id === id || p.key === id);
+  const index = (db.problemSolutions || []).findIndex((p) => p.id === id || p.key === id);
   if (index === -1) return res.status(404).json({ error: "Problem solution not found" });
-
   const removed = db.problemSolutions.splice(index, 1)[0];
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Problem Solution Deleted",
     details: `Removed problem solution: "${removed.title}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
   saveDb();
   await saveProblemSolutionsToFirestore(db.problemSolutions);
   res.json({ success: true, removedId: id });
 });
-
-app.patch('/api/admin/problem-solutions/:id/status', checkAdminAuth, async (req, res) => {
+app.patch("/api/admin/problem-solutions/:id/status", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
-  const index = (db.problemSolutions || []).findIndex((p: any) => p.id === id || p.key === id);
+  const index = (db.problemSolutions || []).findIndex((p) => p.id === id || p.key === id);
   if (index === -1) return res.status(404).json({ error: "Problem solution not found" });
-
-  const newStatus = req.body.status || (db.problemSolutions[index].status === 'published' ? 'unpublished' : 'published');
+  const newStatus = req.body.status || (db.problemSolutions[index].status === "published" ? "unpublished" : "published");
   db.problemSolutions[index].status = newStatus;
   saveDb();
   await saveProblemSolutionsToFirestore(db.problemSolutions);
   res.json({ success: true, item: db.problemSolutions[index], status: newStatus });
 });
-
-// ----------------- PROBLEM LEADS CRM -----------------
-app.post('/api/problem-leads', publicApiRateLimiter, async (req, res) => {
+app.post("/api/problem-leads", publicApiRateLimiter, async (req, res) => {
   const { fullName, phone, whatsapp, email, area, deviceType, problemTitle, problemDescription, urgency } = req.body;
   if (!fullName || !phone || !problemDescription) {
     return res.status(400).json({ error: "Full name, phone, and problem description are required." });
   }
-
   if (!Array.isArray(db.problemLeads)) db.problemLeads = [];
-
   const newLead = {
     id: `LEAD-PRB-${Date.now().toString(36).toUpperCase()}`,
-    createdAt: new Date().toISOString(),
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     fullName: String(fullName).trim(),
     phone: String(phone).trim(),
     whatsapp: String(whatsapp || phone).trim(),
-    email: email ? String(email).trim() : undefined,
-    area: String(area || 'Peshawar').trim(),
-    deviceType: String(deviceType || 'Computer').trim(),
-    problemTitle: String(problemTitle || 'Unlisted Computer Problem').trim(),
+    email: email ? String(email).trim() : void 0,
+    area: String(area || "Peshawar").trim(),
+    deviceType: String(deviceType || "Computer").trim(),
+    problemTitle: String(problemTitle || "Unlisted Computer Problem").trim(),
     problemDescription: String(problemDescription).trim(),
-    urgency: urgency === 'urgent' ? 'urgent' : 'normal',
-    status: 'NEW',
-    technicianNotes: ''
+    urgency: urgency === "urgent" ? "urgent" : "normal",
+    status: "NEW",
+    technicianNotes: ""
   };
-
   db.problemLeads.unshift(newLead);
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "New Problem Lead",
     details: `Customer [${newLead.fullName}] submitted unlisted problem: "${newLead.problemTitle}" (${newLead.phone})`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Website Visitor"
   });
   saveDb();
   await saveProblemLeadToFirestore(newLead);
-
-  // Dispatch Email Notification to Admin Destination
   try {
     const adminDest = getNotificationDestination();
     const subject = sanitizeEmailSubject(`[LEAD INQUIRY] Problem Research Request: ${newLead.problemTitle} (${newLead.fullName})`);
@@ -3845,29 +3711,31 @@ app.post('/api/problem-leads', publicApiRateLimiter, async (req, res) => {
       email: newLead.email,
       area: newLead.area,
       service: `Problem: ${newLead.problemTitle}`,
-      message: `Device: ${newLead.deviceType}\nUrgency: ${newLead.urgency.toUpperCase()}\nRef: ${newLead.id}\n\nProblem Description:\n${newLead.problemDescription}`,
+      message: `Device: ${newLead.deviceType}
+Urgency: ${newLead.urgency.toUpperCase()}
+Ref: ${newLead.id}
+
+Problem Description:
+${newLead.problemDescription}`,
       urgency: newLead.urgency
     });
-
     sendNotificationEmail({
       to: adminDest,
       subject,
       html: emailHtml,
       leadType: "Problem Research Lead",
       leadName: newLead.fullName
-    }).catch(e => console.warn('Problem lead email dispatch error:', e));
+    }).catch((e) => console.warn("Problem lead email dispatch error:", e));
   } catch (err) {
-    console.warn('Problem lead email notification handled:', err);
+    console.warn("Problem lead email notification handled:", err);
   }
-
   res.status(201).json({
     success: true,
     lead: newLead,
     message: "Thank you! Your computer problem has been received. Safiullah will research your symptom and contact you shortly."
   });
 });
-
-app.get('/api/admin/problem-leads', checkAdminAuth, async (req, res) => {
+app.get("/api/admin/problem-leads", checkAdminAuth, async (req, res) => {
   await firestoreReady;
   const fsLeads = await loadProblemLeadsFromFirestore();
   if (fsLeads.length > 0) {
@@ -3875,91 +3743,72 @@ app.get('/api/admin/problem-leads', checkAdminAuth, async (req, res) => {
   }
   res.json({ success: true, problemLeads: db.problemLeads || [] });
 });
-
-app.patch('/api/admin/problem-leads/:id/status', checkAdminAuth, async (req, res) => {
+app.patch("/api/admin/problem-leads/:id/status", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
-  const lead = (db.problemLeads || []).find((l: any) => l.id === id);
+  const lead = (db.problemLeads || []).find((l) => l.id === id);
   if (!lead) return res.status(404).json({ error: "Lead not found" });
-
   lead.status = status;
-  lead.updatedAt = new Date().toISOString();
+  lead.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
   saveDb();
   await saveProblemLeadToFirestore(lead);
   res.json({ success: true, lead });
 });
-
-app.post('/api/admin/problem-leads/:id/notes', checkAdminAuth, async (req, res) => {
+app.post("/api/admin/problem-leads/:id/notes", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const { notes } = req.body;
-  const lead = (db.problemLeads || []).find((l: any) => l.id === id);
+  const lead = (db.problemLeads || []).find((l) => l.id === id);
   if (!lead) return res.status(404).json({ error: "Lead not found" });
-
   lead.technicianNotes = notes;
-  lead.updatedAt = new Date().toISOString();
+  lead.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
   saveDb();
   await saveProblemLeadToFirestore(lead);
   res.json({ success: true, lead });
 });
-
-app.delete('/api/admin/problem-leads/:id', checkAdminAuth, async (req, res) => {
+app.delete("/api/admin/problem-leads/:id", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
-  const index = (db.problemLeads || []).findIndex((l: any) => l.id === id);
+  const index = (db.problemLeads || []).findIndex((l) => l.id === id);
   if (index === -1) return res.status(404).json({ error: "Lead not found" });
-
   const removed = db.problemLeads.splice(index, 1)[0];
   saveDb();
   await deleteProblemLeadFromFirestore(id);
   res.json({ success: true, removedId: id });
 });
-
-// ----------------- CUSTOM ICON UPLOAD -----------------
-app.post('/api/admin/upload-icon', checkAdminAuth, (req, res) => {
+app.post("/api/admin/upload-icon", checkAdminAuth, (req, res) => {
   const { filename, dataUrl } = req.body;
-  if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+  if (!dataUrl || !dataUrl.startsWith("data:image/")) {
     return res.status(400).json({ error: "Valid base64 image dataUrl required." });
   }
-
   ensureDbDirectory();
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
-
   const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
   if (!matches || !matches[2]) {
     return res.status(400).json({ error: "Malformed base64 image data." });
   }
-
-  const ext = matches[1].replace('jpeg', 'jpg').replace('svg+xml', 'svg');
-  const safeBase = (filename || 'service-icon')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
+  const ext = matches[1].replace("jpeg", "jpg").replace("svg+xml", "svg");
+  const safeBase = (filename || "service-icon").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
   const outFilename = `icon-${safeBase}-${Date.now().toString(36)}.${ext}`;
   const outPath = path.join(UPLOADS_DIR, outFilename);
-
-  const buf = Buffer.from(matches[2].replace(/\s+/g, ''), 'base64');
+  const buf = Buffer.from(matches[2].replace(/\s+/g, ""), "base64");
   fs.writeFileSync(outPath, buf);
-
   const finalUrl = `/uploads/${outFilename}`;
   if (!Array.isArray(db.media)) db.media = [];
   db.media.unshift({
     id: `media-icon-${Date.now().toString(36)}`,
     name: outFilename,
     url: finalUrl,
-    dataUrl: dataUrl.length < 500000 ? dataUrl : undefined,
+    dataUrl: dataUrl.length < 5e5 ? dataUrl : void 0,
     size: `${(buf.length / 1024).toFixed(1)} KB`,
     type: `image/${ext}`,
-    uploadedAt: new Date().toISOString(),
-    usedIn: 'Service Custom Icon'
+    uploadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    usedIn: "Service Custom Icon"
   });
   saveDb();
-
   res.json({ success: true, url: finalUrl, filename: outFilename });
 });
-
-// ----------------- BOOKINGS / REQUESTS CRUD -----------------
-app.post('/api/admin/bookings', checkAdminAuth, (req, res) => {
+app.post("/api/admin/bookings", checkAdminAuth, (req, res) => {
   const {
     fullName,
     phone,
@@ -3977,14 +3826,12 @@ app.post('/api/admin/bookings', checkAdminAuth, (req, res) => {
     adminNotes,
     scheduledTime
   } = req.body;
-
   if (!fullName || !phone) {
     return res.status(400).json({ error: "Full Name and Phone Number are required" });
   }
-
   const newBooking = {
     id: `PSH-ADM-${Date.now().toString(36).toUpperCase()}`,
-    createdAt: new Date().toISOString(),
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     fullName: String(fullName).trim(),
     phone: String(phone).trim(),
     whatsapp: String(whatsapp || phone).trim(),
@@ -3993,7 +3840,7 @@ app.post('/api/admin/bookings', checkAdminAuth, (req, res) => {
     computerBrandModel: String(computerBrandModel || "").trim(),
     serviceRequired: String(serviceRequired || "General Troubleshooting").trim(),
     problemDescription: String(problemDescription || "").trim(),
-    preferredDate: preferredDate || new Date().toISOString().split('T')[0],
+    preferredDate: preferredDate || (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
     preferredTime: preferredTime || "Morning (10 AM - 1 PM)",
     urgency: urgency === "Urgent" ? "Urgent" : "Normal",
     containsImportantData: containsImportantData === "YES" ? "YES" : "NO",
@@ -4001,161 +3848,128 @@ app.post('/api/admin/bookings', checkAdminAuth, (req, res) => {
     adminNotes: adminNotes || "",
     scheduledTime: scheduledTime || ""
   };
-
   db.bookings.unshift(newBooking);
-
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Booking Created Manually",
     details: `Admin booked on-site visit for ${newBooking.fullName} (${newBooking.area})`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
   res.status(201).json({ success: true, booking: newBooking });
 });
-
-app.put('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
-  const rawId = req.params.id || '';
+app.put("/api/admin/bookings/:id", checkAdminAuth, (req, res) => {
+  const rawId = req.params.id || "";
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
-
-  const index = db.bookings.findIndex((b: any) => 
-    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
-    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
-    b.id === rawId ||
-    b.id === decodedId
+  const index = db.bookings.findIndex(
+    (b) => b.id && b.id.trim().toLowerCase() === targetIdLower || b.trackingId && b.trackingId.trim().toLowerCase() === targetIdLower || b.id === rawId || b.id === decodedId
   );
-
   if (index === -1) {
-    // If not found in in-memory list, upsert it so updates succeed
     const newBooking = {
       id: decodedId || rawId,
-      createdAt: new Date().toISOString(),
-      fullName: req.body.fullName || 'Customer',
-      phone: req.body.phone || '',
-      whatsapp: req.body.whatsapp || req.body.phone || '',
-      area: req.body.area || 'Peshawar',
-      deviceType: req.body.deviceType || 'Laptop',
-      computerBrandModel: req.body.computerBrandModel || '',
-      serviceRequired: req.body.serviceRequired || 'General Diagnostic',
-      problemDescription: req.body.problemDescription || '',
-      preferredDate: req.body.preferredDate || new Date().toISOString().split('T')[0],
-      preferredTime: req.body.preferredTime || '',
-      urgency: req.body.urgency || 'Normal',
-      containsImportantData: req.body.containsImportantData || 'NO',
-      status: req.body.status || 'NEW',
-      adminNotes: req.body.adminNotes || '',
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      fullName: req.body.fullName || "Customer",
+      phone: req.body.phone || "",
+      whatsapp: req.body.whatsapp || req.body.phone || "",
+      area: req.body.area || "Peshawar",
+      deviceType: req.body.deviceType || "Laptop",
+      computerBrandModel: req.body.computerBrandModel || "",
+      serviceRequired: req.body.serviceRequired || "General Diagnostic",
+      problemDescription: req.body.problemDescription || "",
+      preferredDate: req.body.preferredDate || (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
+      preferredTime: req.body.preferredTime || "",
+      urgency: req.body.urgency || "Normal",
+      containsImportantData: req.body.containsImportantData || "NO",
+      status: req.body.status || "NEW",
+      adminNotes: req.body.adminNotes || "",
       ...req.body
     };
     db.bookings.unshift(newBooking);
     saveDb();
     return res.json({ success: true, booking: newBooking });
   }
-
   const prevStatus = db.bookings[index].status;
   db.bookings[index] = { ...db.bookings[index], ...req.body, id: db.bookings[index].id };
-
   if (req.body.status && req.body.status !== prevStatus) {
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action: "Booking Status Changed",
       details: `Request #${db.bookings[index].id} status changed from ${prevStatus} to ${req.body.status} (${db.bookings[index].fullName})`,
-      timestamp: new Date().toISOString(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
   }
-
   saveDb();
   res.json({ success: true, booking: db.bookings[index] });
 });
-
-// Admin Action 1: Confirm Appointment (Triggers Customer Confirmation Email)
-app.post('/api/admin/bookings/:id/confirm', checkAdminAuth, async (req, res) => {
-  const rawId = req.params.id || '';
+app.post("/api/admin/bookings/:id/confirm", checkAdminAuth, async (req, res) => {
+  const rawId = req.params.id || "";
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
-
-  let booking = db.bookings.find((b: any) => 
-    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
-    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
-    b.id === rawId ||
-    b.id === decodedId
+  let booking = db.bookings.find(
+    (b) => b.id && b.id.trim().toLowerCase() === targetIdLower || b.trackingId && b.trackingId.trim().toLowerCase() === targetIdLower || b.id === rawId || b.id === decodedId
   );
-
   if (!booking) {
     return res.status(404).json({ error: "Booking not found" });
   }
-
   const scheduledTime = req.body.scheduledTime || booking.scheduledTime || `${booking.preferredDate} (${booking.preferredTime})`;
   booking.status = "CONFIRMED";
   booking.scheduledTime = scheduledTime;
-  if (req.body.adminNotes !== undefined) {
+  if (req.body.adminNotes !== void 0) {
     booking.adminNotes = req.body.adminNotes;
   }
-
-  // Also update linked Lead/Inquiry if exists
-  const lead = (db.inquiries || []).find((inq: any) => 
-    inq.bookingId === booking.id || 
-    ((booking as any).leadId && inq.id === (booking as any).leadId) ||
-    (inq.phone && inq.phone === booking.phone)
+  const lead = (db.inquiries || []).find(
+    (inq) => inq.bookingId === booking.id || booking.leadId && inq.id === booking.leadId || inq.phone && inq.phone === booking.phone
   );
   if (lead) {
     lead.status = "CONVERTED";
-    (lead as any).scheduledTime = scheduledTime;
+    lead.scheduledTime = scheduledTime;
   }
-
-  // Activity Log
   db.activityLogs.unshift({
     id: `log-confirm-${Date.now()}`,
     action: "Appointment Confirmed",
     details: `Appointment confirmed for ${booking.fullName} (${booking.area}). Scheduled Time: ${scheduledTime}`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-
-  // Persist confirmed status to Firestore via Firebase Admin SDK
   try {
     const adminDb = getAdminFirestore();
     await Promise.all([
-      adminDb.collection('bookings').doc(booking.id).set({
+      adminDb.collection("bookings").doc(booking.id).set({
         status: "CONFIRMED",
         scheduledTime,
         adminNotes: booking.adminNotes || "",
-        updatedAt: new Date().toISOString()
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       }, { merge: true }),
-      adminDb.collection('serviceRequests').doc(booking.id).set({
+      adminDb.collection("serviceRequests").doc(booking.id).set({
         status: "CONFIRMED",
         scheduledTime,
         adminNotes: booking.adminNotes || "",
-        updatedAt: new Date().toISOString()
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       }, { merge: true }),
-      adminDb.collection('requests').doc(booking.id).set({
+      adminDb.collection("requests").doc(booking.id).set({
         status: "CONFIRMED",
         scheduledTime,
         adminNotes: booking.adminNotes || "",
-        updatedAt: new Date().toISOString()
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       }, { merge: true }),
-      lead ? adminDb.collection('inquiries').doc(lead.id).set({
+      lead ? adminDb.collection("inquiries").doc(lead.id).set({
         status: "CONVERTED",
         scheduledTime,
-        updatedAt: new Date().toISOString()
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       }, { merge: true }) : Promise.resolve()
     ]);
-    console.log(`[FIRESTORE] ✅ Booking ${booking.id} confirmed and updated in Firestore`);
+    console.log(`[FIRESTORE] \u2705 Booking ${booking.id} confirmed and updated in Firestore`);
   } catch (fsErr) {
-    console.error('[FIRESTORE] ❌ Failed to update booking in Firestore:', fsErr);
+    console.error("[FIRESTORE] \u274C Failed to update booking in Firestore:", fsErr);
   }
-
-  // Send Customer Confirmation Email if requested or customer has email
-  let emailDelivery: any = { status: "not_attempted" };
-  const targetEmail = (booking as any).email || (lead ? (lead as any).email : '');
-  const shouldSendEmail = (req.body.sendEmail === true) || (req.body.sendEmail !== false && targetEmail && targetEmail.includes('@'));
-
-  if (shouldSendEmail && targetEmail && targetEmail.includes('@')) {
+  let emailDelivery = { status: "not_attempted" };
+  const targetEmail = booking.email || (lead ? lead.email : "");
+  const shouldSendEmail = req.body.sendEmail === true || req.body.sendEmail !== false && targetEmail && targetEmail.includes("@");
+  if (shouldSendEmail && targetEmail && targetEmail.includes("@")) {
     const html = generateAppointmentConfirmedEmailHtml({
       booking,
       scheduledTime
@@ -4169,15 +3983,14 @@ Primary Phone: ${booking.phone}
 WhatsApp: ${booking.whatsapp || booking.phone}
 Area / Sector: ${booking.area} (Peshawar)
 Service Required: ${booking.serviceRequired}
-Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ""}
 Confirmed Arrival Slot: ${scheduledTime}
-Urgency: ${(booking.urgency || 'NORMAL').toUpperCase()}
-Important Data: ${booking.containsImportantData || 'NO'}
+Urgency: ${(booking.urgency || "NORMAL").toUpperCase()}
+Important Data: ${booking.containsImportantData || "NO"}
 
 Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
 If you need to reschedule or have urgent queries, please call ${techPhone} or message on WhatsApp.
     `.trim();
-
     try {
       emailDelivery = await sendNotificationEmail({
         to: targetEmail,
@@ -4186,66 +3999,47 @@ If you need to reschedule or have urgent queries, please call ${techPhone} or me
         text,
         lead: booking
       });
-      console.log(`✅ Appointment confirmation email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
-    } catch (err: any) {
+      console.log(`\u2705 Appointment confirmation email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
+    } catch (err) {
       console.error("Failed to send customer confirmation email:", err);
       emailDelivery = { status: "failed", error: err.message };
     }
   }
-
-  const isEmailSuccessful = emailDelivery.status === 'sent';
-
+  const isEmailSuccessful = emailDelivery.status === "sent";
   return res.json({
     success: true,
     booking,
     emailDelivery,
     emailSent: isEmailSuccessful,
-    emailError: isEmailSuccessful ? undefined : emailDelivery.error,
-    message: shouldSendEmail && targetEmail
-      ? (isEmailSuccessful
-          ? `Appointment confirmed and confirmation email delivered to ${targetEmail}.`
-          : `Appointment confirmed in database, but confirmation email status: ${emailDelivery.status}. (${emailDelivery.error || 'Check email configuration'})`)
-      : `Appointment confirmed! (Schedule: ${scheduledTime}). Ready for WhatsApp confirmation or manual email dispatch.`
+    emailError: isEmailSuccessful ? void 0 : emailDelivery.error,
+    message: shouldSendEmail && targetEmail ? isEmailSuccessful ? `Appointment confirmed and confirmation email delivered to ${targetEmail}.` : `Appointment confirmed in database, but confirmation email status: ${emailDelivery.status}. (${emailDelivery.error || "Check email configuration"})` : `Appointment confirmed! (Schedule: ${scheduledTime}). Ready for WhatsApp confirmation or manual email dispatch.`
   });
 });
-
-// Dedicated Manual Endpoint: Send Confirmation Email for Booking
-app.post('/api/admin/bookings/:id/send-confirmation-email', checkAdminAuth, async (req, res) => {
-  const rawId = req.params.id || '';
+app.post("/api/admin/bookings/:id/send-confirmation-email", checkAdminAuth, async (req, res) => {
+  const rawId = req.params.id || "";
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
-
-  const booking = db.bookings.find((b: any) => 
-    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
-    b.id === rawId ||
-    b.id === decodedId
+  const booking = db.bookings.find(
+    (b) => b.id && b.id.trim().toLowerCase() === targetIdLower || b.id === rawId || b.id === decodedId
   );
-
   if (!booking) {
     return res.status(404).json({ error: "Booking not found" });
   }
-
-  // Allow admin to override/correct customer email if provided
-  let targetEmail = (req.body?.customerEmail && String(req.body.customerEmail).trim()) || (booking as any).email;
-  if (!targetEmail || !targetEmail.includes('@') || !targetEmail.includes('.')) {
+  let targetEmail = req.body?.customerEmail && String(req.body.customerEmail).trim() || booking.email;
+  if (!targetEmail || !targetEmail.includes("@") || !targetEmail.includes(".")) {
     return res.status(400).json({ error: "No valid customer email address on file for this booking. Please specify a valid email." });
   }
-
-  // Detect common domain typos (e.g. @gmil.com instead of @gmail.com)
   const lowerEmail = targetEmail.toLowerCase();
-  if (lowerEmail.endsWith('@gmil.com') || lowerEmail.endsWith('@gmai.com') || lowerEmail.endsWith('@gmial.com')) {
-    return res.status(400).json({ 
-      error: `Invalid email domain detected in "${targetEmail}". Did you mean "@gmail.com"? Please correct the email before dispatching.` 
+  if (lowerEmail.endsWith("@gmil.com") || lowerEmail.endsWith("@gmai.com") || lowerEmail.endsWith("@gmial.com")) {
+    return res.status(400).json({
+      error: `Invalid email domain detected in "${targetEmail}". Did you mean "@gmail.com"? Please correct the email before dispatching.`
     });
   }
-
-  // If customerEmail was corrected by admin, persist it to the booking record
-  if (req.body?.customerEmail && req.body.customerEmail.trim() !== (booking as any).email) {
-    (booking as any).email = targetEmail;
+  if (req.body?.customerEmail && req.body.customerEmail.trim() !== booking.email) {
+    booking.email = targetEmail;
     saveDb();
   }
-
-  const scheduledTime = req.body.scheduledTime || booking.scheduledTime || `${booking.preferredDate || 'Tomorrow'} (${booking.preferredTime || 'Morning'})`;
+  const scheduledTime = req.body.scheduledTime || booking.scheduledTime || `${booking.preferredDate || "Tomorrow"} (${booking.preferredTime || "Morning"})`;
   const html = generateAppointmentConfirmedEmailHtml({
     booking,
     scheduledTime
@@ -4259,13 +4053,12 @@ Primary Phone: ${booking.phone}
 WhatsApp: ${booking.whatsapp || booking.phone}
 Area / Sector: ${booking.area} (Peshawar)
 Service Required: ${booking.serviceRequired}
-Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ""}
 Confirmed Arrival Slot: ${scheduledTime}
 
 Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
 If you need assistance, please call ${techPhone}.
   `.trim();
-
   try {
     const emailDelivery = await sendNotificationEmail({
       to: targetEmail,
@@ -4274,8 +4067,7 @@ If you need assistance, please call ${techPhone}.
       text,
       lead: booking
     });
-
-    const isDelivered = emailDelivery.status === 'sent';
+    const isDelivered = emailDelivery.status === "sent";
     if (!isDelivered) {
       return res.status(422).json({
         success: false,
@@ -4285,7 +4077,6 @@ If you need assistance, please call ${techPhone}.
         error: emailDelivery.error || `Email delivery failed (${emailDelivery.status}). Check email settings or SMTP password.`
       });
     }
-
     return res.json({
       success: true,
       delivered: true,
@@ -4294,62 +4085,45 @@ If you need assistance, please call ${techPhone}.
       messageId: emailDelivery.messageId,
       message: `Confirmation email successfully delivered to ${targetEmail} via ${emailDelivery.provider.toUpperCase()}!`
     });
-  } catch (err: any) {
+  } catch (err) {
     return res.status(500).json({
       success: false,
       error: err.message || "Failed to dispatch confirmation email."
     });
   }
 });
-
-// Admin Action 2: Contact Customer / Technician Note (Triggers Customer Contact Email)
-app.post('/api/admin/bookings/:id/contact', checkAdminAuth, async (req, res) => {
-  const rawId = req.params.id || '';
+app.post("/api/admin/bookings/:id/contact", checkAdminAuth, async (req, res) => {
+  const rawId = req.params.id || "";
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
-
-  let booking = db.bookings.find((b: any) => 
-    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
-    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
-    b.id === rawId ||
-    b.id === decodedId
+  let booking = db.bookings.find(
+    (b) => b.id && b.id.trim().toLowerCase() === targetIdLower || b.trackingId && b.trackingId.trim().toLowerCase() === targetIdLower || b.id === rawId || b.id === decodedId
   );
-
   if (!booking) {
     return res.status(404).json({ error: "Booking not found" });
   }
-
   booking.status = "CONTACTED";
   const technicianNote = req.body.technicianNote || req.body.adminNotes || "Our technician has reviewed your request and is reaching out to coordinate diagnostic details.";
-  if (req.body.adminNotes !== undefined) {
+  if (req.body.adminNotes !== void 0) {
     booking.adminNotes = req.body.adminNotes;
   }
-
-  // Also update linked Lead/Inquiry
-  const lead = (db.inquiries || []).find((inq: any) => 
-    inq.bookingId === booking.id || 
-    ((booking as any).leadId && inq.id === (booking as any).leadId) ||
-    (inq.phone && inq.phone === booking.phone)
+  const lead = (db.inquiries || []).find(
+    (inq) => inq.bookingId === booking.id || booking.leadId && inq.id === booking.leadId || inq.phone && inq.phone === booking.phone
   );
   if (lead) {
     lead.status = "CONTACTED";
   }
-
-  // Activity Log
   db.activityLogs.unshift({
     id: `log-contact-${Date.now()}`,
     action: "Customer Contacted",
     details: `Technician contacted ${booking.fullName} for Service #${booking.id} (${booking.serviceRequired})`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-
-  // Trigger Contact Email to Customer only if explicitly requested
-  let emailDelivery: any = { status: "not_attempted" };
-  const targetEmail = (booking as any).email || (lead ? (lead as any).email : '');
-  if (req.body.sendEmail === true && targetEmail && targetEmail.includes('@')) {
+  let emailDelivery = { status: "not_attempted" };
+  const targetEmail = booking.email || (lead ? lead.email : "");
+  if (req.body.sendEmail === true && targetEmail && targetEmail.includes("@")) {
     const html = generateTechnicianContactEmailHtml({
       booking,
       technicianNote
@@ -4359,7 +4133,7 @@ TECHNICIAN UPDATE - TECHFIX PESHAWAR
 Service Request Ref ID: ${booking.id}
 Customer: ${booking.fullName}
 Service: ${booking.serviceRequired}
-Device: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Device: ${booking.deviceType} ${booking.computerBrandModel || ""}
 
 Our technician is contacting you regarding your computer service request!
 Please check your WhatsApp or incoming calls (${booking.phone}).
@@ -4370,7 +4144,6 @@ ${technicianNote}
 Direct WhatsApp: https://wa.me/${getTechnicianWhatsApp()}
 Phone: ${getTechnicianPhone()}
     `.trim();
-
     try {
       emailDelivery = await sendNotificationEmail({
         to: targetEmail,
@@ -4379,71 +4152,60 @@ Phone: ${getTechnicianPhone()}
         text,
         lead: booking
       });
-      console.log(`✅ Technician contact email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
-    } catch (err: any) {
+      console.log(`\u2705 Technician contact email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
+    } catch (err) {
       console.error("Failed to send customer contact email:", err);
       emailDelivery = { status: "failed", error: err.message };
     }
   }
-
   res.json({
     success: true,
     booking,
     emailDelivery,
-    message: req.body.sendEmail && targetEmail 
-      ? `Contact email sent to customer at ${targetEmail}.`
-      : `Marked as contacted. Ready for WhatsApp dispatch.`
+    message: req.body.sendEmail && targetEmail ? `Contact email sent to customer at ${targetEmail}.` : `Marked as contacted. Ready for WhatsApp dispatch.`
   });
 });
-
-// Admin Inquiries Actions: Confirm Appointment and Contact
-app.post('/api/admin/inquiries/:id/confirm', checkAdminAuth, async (req, res) => {
+app.post("/api/admin/inquiries/:id/confirm", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
-  const inquiry = (db.inquiries || []).find((inq: any) => inq.id === id);
+  const inquiry = (db.inquiries || []).find((inq) => inq.id === id);
   if (!inquiry) {
     return res.status(404).json({ error: "Inquiry not found" });
   }
-
-  const scheduledTime = req.body.scheduledTime || `${(inquiry as any).preferredDate || new Date().toISOString().split('T')[0]} (${(inquiry as any).preferredTime || 'Morning (10 AM - 1 PM)'})`;
+  const scheduledTime = req.body.scheduledTime || `${inquiry.preferredDate || (/* @__PURE__ */ new Date()).toISOString().split("T")[0]} (${inquiry.preferredTime || "Morning (10 AM - 1 PM)"})`;
   inquiry.status = "CONVERTED";
-
-  // Find or create linked booking
-  let booking = db.bookings.find((b: any) => b.id === (inquiry as any).bookingId || (inquiry.phone && b.phone === inquiry.phone));
+  let booking = db.bookings.find((b) => b.id === inquiry.bookingId || inquiry.phone && b.phone === inquiry.phone);
   if (!booking) {
     booking = {
-      id: (inquiry as any).bookingId || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
-      createdAt: new Date().toISOString(),
+      id: inquiry.bookingId || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       fullName: inquiry.fullName,
       email: inquiry.email,
       phone: inquiry.phone,
       whatsapp: inquiry.whatsapp || inquiry.phone,
       area: inquiry.area || "Peshawar",
-      deviceType: (inquiry as any).deviceType || "Laptop",
-      computerBrandModel: (inquiry as any).computerBrandModel || "",
+      deviceType: inquiry.deviceType || "Laptop",
+      computerBrandModel: inquiry.computerBrandModel || "",
       serviceRequired: inquiry.service || inquiry.subject || "General Troubleshooting",
       problemDescription: inquiry.message,
-      preferredDate: (inquiry as any).preferredDate || new Date().toISOString().split('T')[0],
-      preferredTime: (inquiry as any).preferredTime || "Morning (10 AM - 1 PM)",
-      urgency: (inquiry as any).urgency || "Normal",
-      containsImportantData: (inquiry as any).containsImportantData || "NO",
+      preferredDate: inquiry.preferredDate || (/* @__PURE__ */ new Date()).toISOString().split("T")[0],
+      preferredTime: inquiry.preferredTime || "Morning (10 AM - 1 PM)",
+      urgency: inquiry.urgency || "Normal",
+      containsImportantData: inquiry.containsImportantData || "NO",
       status: "CONFIRMED",
       adminNotes: req.body.adminNotes || "",
       scheduledTime
-    } as any;
+    };
     db.bookings.unshift(booking);
-    (inquiry as any).bookingId = booking.id;
+    inquiry.bookingId = booking.id;
   } else {
     booking.status = "CONFIRMED";
     booking.scheduledTime = scheduledTime;
     if (req.body.adminNotes) booking.adminNotes = req.body.adminNotes;
   }
-
   saveDb();
-
-  // Customer email is only sent if explicitly requested by admin (manual dispatch mode)
-  let emailDelivery: any = { status: "not_attempted" };
-  const targetEmail = (req.body?.customerEmail && req.body.customerEmail.trim()) || inquiry.email || (booking as any).email;
-  if (req.body.sendEmail === true && targetEmail && targetEmail.includes('@')) {
+  let emailDelivery = { status: "not_attempted" };
+  const targetEmail = req.body?.customerEmail && req.body.customerEmail.trim() || inquiry.email || booking.email;
+  if (req.body.sendEmail === true && targetEmail && targetEmail.includes("@")) {
     const html = generateAppointmentConfirmedEmailHtml({
       booking,
       scheduledTime
@@ -4457,13 +4219,12 @@ Primary Phone: ${booking.phone}
 WhatsApp: ${booking.whatsapp || booking.phone}
 Area / Sector: ${booking.area} (Peshawar)
 Service Required: ${booking.serviceRequired}
-Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ""}
 Confirmed Arrival Slot: ${scheduledTime}
 
 Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
 If you have any questions or need to reschedule, please call ${techPhone} or message on WhatsApp.
     `.trim();
-
     try {
       emailDelivery = await sendNotificationEmail({
         to: targetEmail,
@@ -4472,67 +4233,55 @@ If you have any questions or need to reschedule, please call ${techPhone} or mes
         text,
         lead: booking
       });
-      console.log(`✅ Appointment confirmation email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
-    } catch (err: any) {
+      console.log(`\u2705 Appointment confirmation email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
+    } catch (err) {
       console.error("Failed to send customer confirmation email:", err);
       emailDelivery = { status: "failed", error: err.message };
     }
   }
-
   res.json({
     success: true,
     inquiry,
     booking,
     emailDelivery,
-    message: req.body.sendEmail && targetEmail
-      ? (emailDelivery.status === 'sent'
-          ? `Appointment confirmed! Confirmation email delivered to ${targetEmail}.`
-          : `Appointment confirmed, but email status: ${emailDelivery.status}. (${emailDelivery.error || 'Check email configuration'})`)
-      : `Lead converted to confirmed appointment! (Schedule: ${scheduledTime}). Ready for WhatsApp confirmation or manual email dispatch.`
+    message: req.body.sendEmail && targetEmail ? emailDelivery.status === "sent" ? `Appointment confirmed! Confirmation email delivered to ${targetEmail}.` : `Appointment confirmed, but email status: ${emailDelivery.status}. (${emailDelivery.error || "Check email configuration"})` : `Lead converted to confirmed appointment! (Schedule: ${scheduledTime}). Ready for WhatsApp confirmation or manual email dispatch.`
   });
 });
-
-// Dedicated Manual Endpoint: Send Confirmation Email for Inquiry / Converted Lead
-app.post('/api/admin/inquiries/:id/send-confirmation-email', checkAdminAuth, async (req, res) => {
+app.post("/api/admin/inquiries/:id/send-confirmation-email", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
-  const inquiry = (db.inquiries || []).find((inq: any) => inq.id === id);
+  const inquiry = (db.inquiries || []).find((inq) => inq.id === id);
   if (!inquiry) {
     return res.status(404).json({ error: "Inquiry not found" });
   }
-
-  const booking = db.bookings.find((b: any) => b.id === (inquiry as any).bookingId || (inquiry.phone && b.phone === inquiry.phone)) || {
-    id: (inquiry as any).bookingId || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
+  const booking = db.bookings.find((b) => b.id === inquiry.bookingId || inquiry.phone && b.phone === inquiry.phone) || {
+    id: inquiry.bookingId || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
     fullName: inquiry.fullName,
     email: inquiry.email,
     phone: inquiry.phone,
     whatsapp: inquiry.whatsapp || inquiry.phone,
     area: inquiry.area || "Peshawar",
-    deviceType: (inquiry as any).deviceType || "Laptop",
-    computerBrandModel: (inquiry as any).computerBrandModel || "",
+    deviceType: inquiry.deviceType || "Laptop",
+    computerBrandModel: inquiry.computerBrandModel || "",
     serviceRequired: inquiry.service || inquiry.subject || "General Troubleshooting",
     problemDescription: inquiry.message,
     status: "CONFIRMED"
   };
-
-  let targetEmail = (req.body?.customerEmail && String(req.body.customerEmail).trim()) || inquiry.email || (booking as any).email;
-  if (!targetEmail || !targetEmail.includes('@') || !targetEmail.includes('.')) {
+  let targetEmail = req.body?.customerEmail && String(req.body.customerEmail).trim() || inquiry.email || booking.email;
+  if (!targetEmail || !targetEmail.includes("@") || !targetEmail.includes(".")) {
     return res.status(400).json({ error: "No valid customer email address on file for this inquiry. Please provide a valid email." });
   }
-
   const lowerEmail = targetEmail.toLowerCase();
-  if (lowerEmail.endsWith('@gmil.com') || lowerEmail.endsWith('@gmai.com') || lowerEmail.endsWith('@gmial.com')) {
+  if (lowerEmail.endsWith("@gmil.com") || lowerEmail.endsWith("@gmai.com") || lowerEmail.endsWith("@gmial.com")) {
     return res.status(400).json({
       error: `Invalid email domain detected in "${targetEmail}". Did you mean "@gmail.com"? Please correct before sending.`
     });
   }
-
   if (req.body?.customerEmail && req.body.customerEmail.trim() !== inquiry.email) {
     inquiry.email = targetEmail;
-    if (booking) (booking as any).email = targetEmail;
+    if (booking) booking.email = targetEmail;
     saveDb();
   }
-
-  const scheduledTime = req.body.scheduledTime || (booking as any).scheduledTime || `${(inquiry as any).preferredDate || 'Tomorrow'} (${(inquiry as any).preferredTime || 'Morning'})`;
+  const scheduledTime = req.body.scheduledTime || booking.scheduledTime || `${inquiry.preferredDate || "Tomorrow"} (${inquiry.preferredTime || "Morning"})`;
   const html = generateAppointmentConfirmedEmailHtml({
     booking,
     scheduledTime
@@ -4546,13 +4295,12 @@ Primary Phone: ${booking.phone}
 WhatsApp: ${booking.whatsapp || booking.phone}
 Area / Sector: ${booking.area} (Peshawar)
 Service Required: ${booking.serviceRequired}
-Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ""}
 Confirmed Arrival Slot: ${scheduledTime}
 
 Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
 If you need assistance, please call ${techPhone}.
   `.trim();
-
   try {
     const emailDelivery = await sendNotificationEmail({
       to: targetEmail,
@@ -4561,8 +4309,7 @@ If you need assistance, please call ${techPhone}.
       text,
       lead: booking
     });
-
-    const isDelivered = emailDelivery.status === 'sent';
+    const isDelivered = emailDelivery.status === "sent";
     if (!isDelivered) {
       return res.status(422).json({
         success: false,
@@ -4572,7 +4319,6 @@ If you need assistance, please call ${techPhone}.
         error: emailDelivery.error || `Email delivery failed (${emailDelivery.status}). Check email settings or SMTP password.`
       });
     }
-
     return res.json({
       success: true,
       delivered: true,
@@ -4581,26 +4327,22 @@ If you need assistance, please call ${techPhone}.
       messageId: emailDelivery.messageId,
       message: `Confirmation email successfully delivered to ${targetEmail} via ${emailDelivery.provider.toUpperCase()}!`
     });
-  } catch (err: any) {
+  } catch (err) {
     return res.status(500).json({
       success: false,
       error: err.message || "Failed to dispatch confirmation email."
     });
   }
 });
-
-app.post('/api/admin/inquiries/:id/contact', checkAdminAuth, async (req, res) => {
+app.post("/api/admin/inquiries/:id/contact", checkAdminAuth, async (req, res) => {
   const { id } = req.params;
-  const inquiry = (db.inquiries || []).find((inq: any) => inq.id === id);
+  const inquiry = (db.inquiries || []).find((inq) => inq.id === id);
   if (!inquiry) {
     return res.status(404).json({ error: "Inquiry not found" });
   }
-
   inquiry.status = "CONTACTED";
   const technicianNote = req.body.technicianNote || req.body.adminNotes || "Our technician has reviewed your inquiry and is reaching out via WhatsApp.";
-
-  // Find linked booking if any
-  let booking = db.bookings.find((b: any) => b.id === (inquiry as any).bookingId || (inquiry.phone && b.phone === inquiry.phone));
+  let booking = db.bookings.find((b) => b.id === inquiry.bookingId || inquiry.phone && b.phone === inquiry.phone);
   if (booking) {
     booking.status = "CONTACTED";
   } else {
@@ -4611,20 +4353,17 @@ app.post('/api/admin/inquiries/:id/contact', checkAdminAuth, async (req, res) =>
       phone: inquiry.phone,
       whatsapp: inquiry.whatsapp || inquiry.phone,
       area: inquiry.area || "Peshawar",
-      deviceType: (inquiry as any).deviceType || "Computer",
-      computerBrandModel: (inquiry as any).computerBrandModel || "",
+      deviceType: inquiry.deviceType || "Computer",
+      computerBrandModel: inquiry.computerBrandModel || "",
       serviceRequired: inquiry.service || inquiry.subject || "General Support",
       problemDescription: inquiry.message,
       status: "CONTACTED"
-    } as any;
+    };
   }
-
   saveDb();
-
-  // Send contact notification email only if explicitly requested
-  let emailDelivery: any = { status: "not_attempted" };
+  let emailDelivery = { status: "not_attempted" };
   const targetEmail = inquiry.email;
-  if (req.body.sendEmail === true && targetEmail && targetEmail.includes('@')) {
+  if (req.body.sendEmail === true && targetEmail && targetEmail.includes("@")) {
     const html = generateTechnicianContactEmailHtml({
       booking,
       technicianNote
@@ -4640,7 +4379,6 @@ Please check your WhatsApp or phone messages (${inquiry.phone}).
 Technician Note:
 ${technicianNote}
     `.trim();
-
     try {
       emailDelivery = await sendNotificationEmail({
         to: targetEmail,
@@ -4649,80 +4387,59 @@ ${technicianNote}
         text,
         lead: inquiry
       });
-    } catch (err: any) {
+    } catch (err) {
       emailDelivery = { status: "failed", error: err.message };
     }
   }
-
   res.json({
     success: true,
     inquiry,
     emailDelivery,
-    message: req.body.sendEmail && targetEmail
-      ? `Contact email sent to ${targetEmail}.`
-      : `Marked as contacted. Ready for WhatsApp follow-up.`
+    message: req.body.sendEmail && targetEmail ? `Contact email sent to ${targetEmail}.` : `Marked as contacted. Ready for WhatsApp follow-up.`
   });
 });
-
-app.delete('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
-  const rawId = req.params.id || '';
+app.delete("/api/admin/bookings/:id", checkAdminAuth, (req, res) => {
+  const rawId = req.params.id || "";
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
-
-  // Find matching item leniently (by id or trackingId, case-insensitive)
-  const index = db.bookings.findIndex((b: any) => 
-    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
-    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
-    b.id === rawId ||
-    b.id === decodedId
+  const index = db.bookings.findIndex(
+    (b) => b.id && b.id.trim().toLowerCase() === targetIdLower || b.trackingId && b.trackingId.trim().toLowerCase() === targetIdLower || b.id === rawId || b.id === decodedId
   );
-
-  let removedItem: any = null;
+  let removedItem = null;
   if (index !== -1) {
     removedItem = db.bookings[index];
     db.bookings.splice(index, 1);
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action: "Booking Deleted",
-      details: `Removed request #${removedItem.id || decodedId} for ${removedItem.fullName || 'Customer'}`,
-      timestamp: new Date().toISOString(),
+      details: `Removed request #${removedItem.id || decodedId} for ${removedItem.fullName || "Customer"}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
   }
-
-  // Also remove any duplicate or related matches
   const beforeLen = db.bookings.length;
-  db.bookings = db.bookings.filter((b: any) => 
-    b.id !== rawId && 
-    b.id !== decodedId &&
-    (!b.id || b.id.trim().toLowerCase() !== targetIdLower) &&
-    (!(b as any).trackingId || (b as any).trackingId.trim().toLowerCase() !== targetIdLower)
+  db.bookings = db.bookings.filter(
+    (b) => b.id !== rawId && b.id !== decodedId && (!b.id || b.id.trim().toLowerCase() !== targetIdLower) && (!b.trackingId || b.trackingId.trim().toLowerCase() !== targetIdLower)
   );
-
   if (removedItem || db.bookings.length !== beforeLen) {
     saveDb();
     const targetDelId = removedItem?.id || decodedId;
-    deleteDocFromFirestore('bookings', targetDelId);
-    deleteDocFromFirestore('serviceRequests', targetDelId);
-    deleteDocFromFirestore('requests', targetDelId);
-    deleteDocFromFirestore('inquiries', targetDelId);
+    deleteDocFromFirestore("bookings", targetDelId);
+    deleteDocFromFirestore("serviceRequests", targetDelId);
+    deleteDocFromFirestore("requests", targetDelId);
+    deleteDocFromFirestore("inquiries", targetDelId);
   }
-
-  // Idempotent success response ensures that deletion proceeds cleanly on frontend & Firestore
-  res.json({ 
-    success: true, 
+  res.json({
+    success: true,
     message: removedItem ? `Booking ${removedItem.id} deleted successfully.` : `Booking removed.`,
     deletedId: removedItem?.id || decodedId
   });
 });
-
-// ----------------- CUSTOMERS CRUD -----------------
-app.post('/api/admin/customers', checkAdminAuth, (req, res) => {
+app.post("/api/admin/customers", checkAdminAuth, (req, res) => {
   const { name, phone, whatsapp, area, notes, devices, totalSpent } = req.body;
   if (!name || !phone) {
     return res.status(400).json({ error: "Name and Phone are required" });
   }
-
   const newCust = {
     id: `cust-${Date.now()}`,
     name: String(name).trim(),
@@ -4735,100 +4452,86 @@ app.post('/api/admin/customers', checkAdminAuth, (req, res) => {
     notes: notes || "",
     devices: Array.isArray(devices) ? devices : []
   };
-
   db.customers.unshift(newCust);
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "Customer Profile Created",
     details: `Added new client: ${newCust.name} (${newCust.phone})`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-  syncDocToFirestore('customers', newCust.id, newCust);
+  syncDocToFirestore("customers", newCust.id, newCust);
   res.status(201).json({ success: true, customer: newCust });
 });
-
-app.put('/api/admin/customers/:id', checkAdminAuth, (req, res) => {
+app.put("/api/admin/customers/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  const index = db.customers.findIndex((c: any) => c.id === id);
+  const index = db.customers.findIndex((c) => c.id === id);
   if (index === -1) return res.status(404).json({ error: "Customer not found" });
-
   db.customers[index] = { ...db.customers[index], ...req.body, id };
   saveDb();
-  syncDocToFirestore('customers', id, db.customers[index]);
+  syncDocToFirestore("customers", id, db.customers[index]);
   res.json({ success: true, customer: db.customers[index] });
 });
-
-app.delete('/api/admin/customers/:id', checkAdminAuth, (req, res) => {
+app.delete("/api/admin/customers/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  db.customers = db.customers.filter((c: any) => c.id !== id);
+  db.customers = db.customers.filter((c) => c.id !== id);
   saveDb();
-  deleteDocFromFirestore('customers', id);
+  deleteDocFromFirestore("customers", id);
   res.json({ success: true });
 });
-
-// ----------------- FAQS CRUD -----------------
-app.post('/api/admin/faqs', checkAdminAuth, (req, res) => {
+app.post("/api/admin/faqs", checkAdminAuth, (req, res) => {
   const { question, answer, category } = req.body;
   if (!question || !answer) {
     return res.status(400).json({ error: "Question and Answer are required" });
   }
-
   const newFaq = {
     id: `faq-${Date.now()}`,
     question: String(question).trim(),
     answer: String(answer).trim(),
     category: category || "General"
   };
-
   db.faqs.push(newFaq);
   db.activityLogs.unshift({
     id: `log-${Date.now()}`,
     action: "FAQ Added",
     details: `Added new FAQ: "${newFaq.question.slice(0, 45)}..."`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
-
   saveDb();
-  syncDocToFirestore('faqs', newFaq.id, newFaq);
+  syncDocToFirestore("faqs", newFaq.id, newFaq);
   res.status(201).json({ success: true, faq: newFaq });
 });
-
-app.put('/api/admin/faqs/:id', checkAdminAuth, (req, res) => {
+app.put("/api/admin/faqs/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  const index = db.faqs.findIndex((f: any) => f.id === id);
+  const index = db.faqs.findIndex((f) => f.id === id);
   if (index === -1) return res.status(404).json({ error: "FAQ not found" });
-
   db.faqs[index] = { ...db.faqs[index], ...req.body, id };
   saveDb();
-  syncDocToFirestore('faqs', id, db.faqs[index]);
+  syncDocToFirestore("faqs", id, db.faqs[index]);
   res.json({ success: true, faq: db.faqs[index] });
 });
-
-app.delete('/api/admin/faqs/:id', checkAdminAuth, (req, res) => {
+app.delete("/api/admin/faqs/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  db.faqs = db.faqs.filter((f: any) => f.id !== id);
+  db.faqs = db.faqs.filter((f) => f.id !== id);
   saveDb();
-  deleteDocFromFirestore('faqs', id);
+  deleteDocFromFirestore("faqs", id);
   res.json({ success: true });
 });
-
-app.put('/api/admin/faqs', checkAdminAuth, (req, res) => {
+app.put("/api/admin/faqs", checkAdminAuth, (req, res) => {
   const { faqs } = req.body;
   if (Array.isArray(faqs)) {
     db.faqs = faqs;
     saveDb();
-    faqs.forEach((f: any) => { if (f?.id) syncDocToFirestore('faqs', f.id, f); });
+    faqs.forEach((f) => {
+      if (f?.id) syncDocToFirestore("faqs", f.id, f);
+    });
     return res.json({ success: true, faqs: db.faqs });
   }
   res.status(400).json({ error: "Invalid faqs format" });
 });
-
-// ----------------- CASE STUDIES CRUD -----------------
-app.post('/api/admin/case-studies', checkAdminAuth, (req, res) => {
+app.post("/api/admin/case-studies", checkAdminAuth, (req, res) => {
   const { title, customerType, problem, diagnosis, solution, result, deviceInfo } = req.body;
   if (!problem || !solution) {
     return res.status(400).json({ error: "Problem and solution are required" });
@@ -4837,7 +4540,7 @@ app.post('/api/admin/case-studies', checkAdminAuth, (req, res) => {
     id: `case-${Date.now()}`,
     title: title || "On-Site Repair Case",
     customerType: customerType || "Home User",
-    date: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+    date: (/* @__PURE__ */ new Date()).toLocaleDateString("en-US", { month: "short", year: "numeric" }),
     problem,
     diagnosis: diagnosis || "",
     solution,
@@ -4849,264 +4552,221 @@ app.post('/api/admin/case-studies', checkAdminAuth, (req, res) => {
     id: `log-${Date.now()}`,
     action: "Real Service Case Published",
     details: `Published case: "${newCase.title}"`,
-    timestamp: new Date().toISOString(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     user: "Safiullah (Admin)"
   });
   saveDb();
-  syncDocToFirestore('caseStudies', newCase.id, newCase);
+  syncDocToFirestore("caseStudies", newCase.id, newCase);
   res.json({ success: true, caseStudy: newCase });
 });
-
-app.put('/api/admin/case-studies/:id', checkAdminAuth, (req, res) => {
+app.put("/api/admin/case-studies/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  const index = db.caseStudies.findIndex((c: any) => c.id === id);
+  const index = db.caseStudies.findIndex((c) => c.id === id);
   if (index === -1) return res.status(404).json({ error: "Case study not found" });
-
   db.caseStudies[index] = { ...db.caseStudies[index], ...req.body, id };
   saveDb();
-  syncDocToFirestore('caseStudies', id, db.caseStudies[index]);
+  syncDocToFirestore("caseStudies", id, db.caseStudies[index]);
   res.json({ success: true, caseStudy: db.caseStudies[index] });
 });
-
-app.delete('/api/admin/case-studies/:id', checkAdminAuth, (req, res) => {
-  db.caseStudies = db.caseStudies.filter((c: any) => c.id !== req.params.id);
+app.delete("/api/admin/case-studies/:id", checkAdminAuth, (req, res) => {
+  db.caseStudies = db.caseStudies.filter((c) => c.id !== req.params.id);
   saveDb();
-  deleteDocFromFirestore('caseStudies', req.params.id);
+  deleteDocFromFirestore("caseStudies", req.params.id);
   res.json({ success: true });
 });
-
-// ----------------- MEDIA UPLOAD & MANAGEMENT -----------------
-app.post('/api/admin/media/upload', uploadRateLimiter, checkAdminAuth, (req, res) => {
+app.post("/api/admin/media/upload", uploadRateLimiter, checkAdminAuth, (req, res) => {
   const { name, dataUrl, usedIn } = req.body;
   if (!dataUrl) {
     return res.status(400).json({ error: "No image data provided" });
   }
-
   try {
     let finalUrl = dataUrl;
-
-    // Check if it's base64, validate magic bytes, and write file to UPLOADS_DIR
-    if (dataUrl.startsWith('data:image/')) {
+    if (dataUrl.startsWith("data:image/")) {
       const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
       if (matches && matches[2]) {
-        const cleanBase64 = matches[2].replace(/\s+/g, '');
-        const buffer = Buffer.from(cleanBase64, 'base64');
+        const cleanBase64 = matches[2].replace(/\s+/g, "");
+        const buffer = Buffer.from(cleanBase64, "base64");
         const { valid, ext } = validateImageMagicBytes(buffer);
         if (!valid) {
           return res.status(400).json({ error: "Invalid image format. Only authentic JPEG, PNG, WebP, and GIF images are permitted." });
         }
-
-        const safeRandomName = `img-${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
+        const safeRandomName = `img-${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${ext}`;
         const filePath = path.join(UPLOADS_DIR, safeRandomName);
         try {
           if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
           fs.writeFileSync(filePath, buffer);
           finalUrl = `/uploads/${safeRandomName}`;
         } catch (fsErr) {
-          // Read-only filesystem in serverless environments (Vercel)
           finalUrl = dataUrl;
         }
       }
     }
-
     const newMedia = {
       id: `media-${Date.now()}`,
-      name: name || 'Uploaded Image',
+      name: name || "Uploaded Image",
       url: finalUrl,
-      dataUrl: dataUrl,
+      dataUrl,
       size: `${Math.round(dataUrl.length / 1370)} KB`,
-      type: 'image',
-      uploadedAt: new Date().toISOString(),
-      usedIn: usedIn || 'General Media'
+      type: "image",
+      uploadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      usedIn: usedIn || "General Media"
     };
-
     db.media.unshift(newMedia);
-
-    // If marked for technician photo, update settings
-    if (usedIn === 'Technician Profile' || usedIn === 'technicianPhoto') {
+    if (usedIn === "Technician Profile" || usedIn === "technicianPhoto") {
       db.settings.technicianPhoto = finalUrl;
     }
-
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action: "Image Uploaded",
       details: `Uploaded image asset "${newMedia.name}" for ${newMedia.usedIn}`,
-      timestamp: new Date().toISOString(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
-
     saveDb();
     res.status(201).json({ success: true, item: newMedia, photoUrl: finalUrl });
-  } catch (err: any) {
+  } catch (err) {
     console.error("Upload error:", err);
     res.status(500).json({ error: "The uploaded file could not be processed. Please try again." });
   }
 });
-
-// Dedicated Profile Photo upload endpoint
-app.post('/api/admin/profile-photo', uploadRateLimiter, checkAdminAuth, (req, res) => {
+app.post("/api/admin/profile-photo", uploadRateLimiter, checkAdminAuth, (req, res) => {
   const { dataUrl, filename } = req.body;
   if (!dataUrl) {
     return res.status(400).json({ error: "No profile photo data provided" });
   }
-
   try {
     let finalUrl = dataUrl;
-    if (dataUrl.startsWith('data:image/')) {
+    if (dataUrl.startsWith("data:image/")) {
       const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
       if (matches && matches[2]) {
-        const cleanBase64 = matches[2].replace(/\s+/g, '');
-        const buffer = Buffer.from(cleanBase64, 'base64');
+        const cleanBase64 = matches[2].replace(/\s+/g, "");
+        const buffer = Buffer.from(cleanBase64, "base64");
         const { valid, ext } = validateImageMagicBytes(buffer);
         if (!valid) {
           return res.status(400).json({ error: "Invalid image format. Only authentic JPEG, PNG, WebP, and GIF images are permitted." });
         }
-
-        const safeRandomName = `technician-portrait-${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
+        const safeRandomName = `technician-portrait-${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${ext}`;
         const filePath = path.join(UPLOADS_DIR, safeRandomName);
         try {
           if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
           fs.writeFileSync(filePath, buffer);
           finalUrl = `/uploads/${safeRandomName}`;
         } catch (fsErr) {
-          // Read-only filesystem in serverless environments (Vercel)
           finalUrl = dataUrl;
         }
       }
     }
-
     db.settings.technicianPhoto = finalUrl;
-
     const mediaItem = {
       id: `media-profile-${Date.now()}`,
-      name: filename || 'Technician Profile Photo',
+      name: filename || "Technician Profile Photo",
       url: finalUrl,
-      dataUrl: dataUrl,
+      dataUrl,
       size: `${Math.round(dataUrl.length / 1370)} KB`,
-      type: 'image',
-      uploadedAt: new Date().toISOString(),
-      usedIn: 'Technician Profile'
+      type: "image",
+      uploadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      usedIn: "Technician Profile"
     };
     db.media.unshift(mediaItem);
-
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action: "Profile Picture Updated",
       details: "Technician profile portrait photo updated successfully",
-      timestamp: new Date().toISOString(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
-
     saveDb();
     res.json({ success: true, photoUrl: finalUrl, settings: db.settings });
-  } catch (err: any) {
+  } catch (err) {
     console.error("Profile photo upload error:", err);
     res.status(500).json({ error: "The uploaded file could not be processed. Please try again." });
   }
 });
-
-// Serve direct media item by ID
-app.get('/api/media/image/:id', (req, res) => {
-  const item: any = db.media.find((m: any) => m.id === req.params.id);
-  if (!item) return res.status(404).send('Image not found');
-  if (item.dataUrl && item.dataUrl.startsWith('data:image/')) {
+app.get("/api/media/image/:id", (req, res) => {
+  const item = db.media.find((m) => m.id === req.params.id);
+  if (!item) return res.status(404).send("Image not found");
+  if (item.dataUrl && item.dataUrl.startsWith("data:image/")) {
     const matches = item.dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
     if (matches && matches[2]) {
       const mime = `image/${matches[1]}`;
-      const buf = Buffer.from(matches[2].replace(/\s+/g, ''), 'base64');
-      res.setHeader('Content-Type', mime);
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      const buf = Buffer.from(matches[2].replace(/\s+/g, ""), "base64");
+      res.setHeader("Content-Type", mime);
+      res.setHeader("Cache-Control", "public, max-age=86400");
       return res.send(buf);
     }
   }
-  if (item.url && item.url.startsWith('/uploads/')) {
+  if (item.url && item.url.startsWith("/uploads/")) {
     const filePath = path.join(UPLOADS_DIR, path.basename(item.url));
     if (fs.existsSync(filePath)) return res.sendFile(filePath);
   }
-  res.redirect('/uploads/technician-portrait-1789213477063.jpg');
+  res.redirect("/uploads/technician-portrait-1789213477063.jpg");
 });
-
-app.delete('/api/admin/media/:id', checkAdminAuth, (req, res) => {
+app.delete("/api/admin/media/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
-  db.media = db.media.filter((m: any) => m.id !== id);
+  db.media = db.media.filter((m) => m.id !== id);
   saveDb();
   res.json({ success: true });
 });
-
-// ----------------- SETTINGS & WEBSITE CONTENT -----------------
-app.put('/api/admin/settings', checkAdminAuth, async (req, res) => {
+app.put("/api/admin/settings", checkAdminAuth, async (req, res) => {
   const { settings } = req.body;
-  if (!settings || typeof settings !== 'object') {
+  if (!settings || typeof settings !== "object") {
     return res.status(400).json({ error: "Invalid settings format" });
   }
-
   try {
-    // 1. Save email credentials securely to server-only Firestore doc: settings/email
     const safeEmail = await saveEmailSettings({
       provider: settings.emailProvider,
       senderEmail: settings.resendFromEmail || settings.senderEmail,
       adminEmail: settings.resendTargetEmail || settings.targetEmail || settings.adminEmail,
       resendApiKey: settings.resendApiKey,
       smtpHost: settings.smtpHost,
-      smtpPort: settings.smtpPort ? Number(settings.smtpPort) : undefined,
+      smtpPort: settings.smtpPort ? Number(settings.smtpPort) : void 0,
       smtpUser: settings.gmailUser || settings.smtpUser,
       smtpPassword: settings.smtpPassword || settings.gmailAppPassword,
       clearResendApiKey: settings.clearResendApiKey === true,
-      clearSmtpPassword: settings.clearSmtpPassword === true,
+      clearSmtpPassword: settings.clearSmtpPassword === true
     });
-
-    // 2. Synchronize memory state & non-credential fields for public config
     const protectedMerge = { ...db.settings };
     for (const [key, val] of Object.entries(settings)) {
       if (!CREDENTIAL_FIELDS.includes(key)) {
-        (protectedMerge as any)[key] = val;
+        protectedMerge[key] = val;
       }
     }
-    // Mirror email safe state into memory
-    (protectedMerge as any).emailProvider = safeEmail.provider;
-    (protectedMerge as any).resendFromEmail = safeEmail.senderEmail;
-    (protectedMerge as any).resendTargetEmail = safeEmail.adminEmail;
-    (protectedMerge as any).gmailUser = safeEmail.smtpUser;
-    (protectedMerge as any).smtpHost = safeEmail.smtpHost;
-    (protectedMerge as any).smtpPort = safeEmail.smtpPort;
-
+    protectedMerge.emailProvider = safeEmail.provider;
+    protectedMerge.resendFromEmail = safeEmail.senderEmail;
+    protectedMerge.resendTargetEmail = safeEmail.adminEmail;
+    protectedMerge.gmailUser = safeEmail.smtpUser;
+    protectedMerge.smtpHost = safeEmail.smtpHost;
+    protectedMerge.smtpPort = safeEmail.smtpPort;
     db.settings = protectedMerge;
     NOTIFICATION_DESTINATION = safeEmail.adminEmail || getNotificationDestination();
-
-    // 3. Save public settings to Firestore (settings/site_config) and local file fallback
     saveDb();
     await saveSettingsToFirestore(db.settings);
-
-    const emailConfigLog: string[] = [
+    const emailConfigLog = [
       `Engine: ${safeEmail.provider.toUpperCase()}`,
-      `Resend Key: ${safeEmail.resendApiKeyConfigured ? '[CONFIGURED]' : '[NOT SET]'}`,
-      `SMTP Pass: ${safeEmail.smtpPasswordConfigured ? '[CONFIGURED]' : '[NOT SET]'}`,
+      `Resend Key: ${safeEmail.resendApiKeyConfigured ? "[CONFIGURED]" : "[NOT SET]"}`,
+      `SMTP Pass: ${safeEmail.smtpPasswordConfigured ? "[CONFIGURED]" : "[NOT SET]"}`,
       `Sender: "${safeEmail.senderEmail}"`,
       `Destination: "${safeEmail.adminEmail}"`
     ];
-
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action: "Settings Saved",
-      details: `Updated settings & active email configuration (${emailConfigLog.join(', ')})`,
-      timestamp: new Date().toISOString(),
+      details: `Updated settings & active email configuration (${emailConfigLog.join(", ")})`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
     if (db.activityLogs.length > 100) db.activityLogs.pop();
-
-    // 4. Return sanitized settings to client (NEVER leak secrets)
     const sanitizedResponse = {
       ...db.settings,
       ...safeEmail
     };
-    delete (sanitizedResponse as any).resendApiKey;
-    delete (sanitizedResponse as any).gmailAppPassword;
-    delete (sanitizedResponse as any).smtpPassword;
-    delete (sanitizedResponse as any).adminPassword;
-    delete (sanitizedResponse as any).apiSecret;
-
-    return res.json({ 
-      success: true, 
+    delete sanitizedResponse.resendApiKey;
+    delete sanitizedResponse.gmailAppPassword;
+    delete sanitizedResponse.smtpPassword;
+    delete sanitizedResponse.adminPassword;
+    delete sanitizedResponse.apiSecret;
+    return res.json({
+      success: true,
       settings: sanitizedResponse,
       activeEmailConfig: {
         target: NOTIFICATION_DESTINATION,
@@ -5114,23 +4774,22 @@ app.put('/api/admin/settings', checkAdminAuth, async (req, res) => {
         hasApiKey: safeEmail.resendApiKeyConfigured,
         hasSmtpPass: safeEmail.smtpPasswordConfigured
       },
-      message: "Settings saved successfully! Email credentials securely persisted in Firestore." 
+      message: "Settings saved successfully! Email credentials securely persisted in Firestore."
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error("Error saving admin settings:", err);
     return res.status(500).json({ error: "Failed to save settings: " + (err?.message || err) });
   }
 });
-
-app.put('/api/admin/website-content', checkAdminAuth, (req, res) => {
+app.put("/api/admin/website-content", checkAdminAuth, (req, res) => {
   const { websiteContent } = req.body;
-  if (websiteContent && typeof websiteContent === 'object') {
+  if (websiteContent && typeof websiteContent === "object") {
     db.websiteContent = { ...db.websiteContent, ...websiteContent };
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action: "Website Content Updated",
       details: `Updated homepage headline, announcements, and SEO meta tags`,
-      timestamp: new Date().toISOString(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
     saveDb();
@@ -5138,8 +4797,7 @@ app.put('/api/admin/website-content', checkAdminAuth, (req, res) => {
   }
   res.status(400).json({ error: "Invalid websiteContent format" });
 });
-
-app.put('/api/admin/categories', checkAdminAuth, (req, res) => {
+app.put("/api/admin/categories", checkAdminAuth, (req, res) => {
   const { categories } = req.body;
   if (Array.isArray(categories)) {
     db.categories = categories;
@@ -5148,8 +4806,7 @@ app.put('/api/admin/categories', checkAdminAuth, (req, res) => {
   }
   res.status(400).json({ error: "Invalid categories format" });
 });
-
-app.put('/api/admin/areas', checkAdminAuth, (req, res) => {
+app.put("/api/admin/areas", checkAdminAuth, (req, res) => {
   const { serviceAreas } = req.body;
   if (Array.isArray(serviceAreas)) {
     db.serviceAreas = serviceAreas;
@@ -5157,7 +4814,7 @@ app.put('/api/admin/areas', checkAdminAuth, (req, res) => {
       id: `log-${Date.now()}`,
       action: "Service Areas Updated",
       details: `Coverage list updated (${serviceAreas.length} active Peshawar neighborhoods)`,
-      timestamp: new Date().toISOString(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
     saveDb();
@@ -5165,15 +4822,14 @@ app.put('/api/admin/areas', checkAdminAuth, (req, res) => {
   }
   res.status(400).json({ error: "Invalid areas format" });
 });
-
-app.post('/api/admin/activity-logs', checkAdminAuth, (req, res) => {
+app.post("/api/admin/activity-logs", checkAdminAuth, (req, res) => {
   const { action, details } = req.body;
   if (action) {
     db.activityLogs.unshift({
       id: `log-${Date.now()}`,
       action,
       details: details || "",
-      timestamp: new Date().toISOString(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       user: "Safiullah (Admin)"
     });
     if (db.activityLogs.length > 100) db.activityLogs.pop();
@@ -5181,9 +4837,7 @@ app.post('/api/admin/activity-logs', checkAdminAuth, (req, res) => {
   }
   res.json({ success: true });
 });
-
-// Reset demo data helper
-app.post('/api/admin/reset-defaults', checkAdminAuth, (req, res) => {
+app.post("/api/admin/reset-defaults", checkAdminAuth, (req, res) => {
   const currentBookings = db.bookings || [];
   const currentInquiries = db.inquiries || [];
   const currentActivity = db.activityLogs || [];
@@ -5194,44 +4848,46 @@ app.post('/api/admin/reset-defaults', checkAdminAuth, (req, res) => {
   saveDb();
   res.json({ success: true, message: "Database reset to official defaults (existing bookings preserved)" });
 });
-
 async function startServer() {
-  // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       root: APP_ROOT,
       server: { middlewareMode: true },
-      appType: "spa",
+      appType: "spa"
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(APP_ROOT, 'dist');
+    const distPath = path.join(APP_ROOT, "dist");
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
-
   if (!process.env.VERCEL) {
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server running on http://localhost:${PORT}`);
     });
   }
 }
-
-// BUG-ROUTE-001: Block the old /admin path at the Express level unconditionally.
-// This applies on Vercel (startServer skipped) AND on local/self-hosted.
-// The secret route /techfixpeshawar007007/admin is handled by React Router via index.html.
-// API routes /api/admin/* are registered earlier and are completely unaffected.
-app.get('/admin', (_req, res) => {
-  res.status(404).send('Not Found');
+app.get("/admin", (_req, res) => {
+  res.status(404).send("Not Found");
 });
-
-// On Vercel: skip startServer() entirely — Vercel handles requests via exported app.
-// On local dev and self-hosted environments: run startServer().
 if (!process.env.VERCEL) {
   startServer();
 }
-
-export default app;
-
+var server_default = app;
+export {
+  NOTIFICATION_DESTINATION,
+  server_default as default,
+  generateAdminSessionToken,
+  getNotificationDestination,
+  getPeshawarDateTimeString,
+  getPeshawarShortTimeString,
+  getPeshawarTimeString,
+  getResendApiKey,
+  getResendFromEmail,
+  getTechnicianPhone,
+  getTechnicianWhatsApp,
+  sendNotificationEmail,
+  verifyAdminSessionToken
+};
