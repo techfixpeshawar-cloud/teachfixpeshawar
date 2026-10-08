@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+*.env
+safi.env
+!.env.example
+
+download.mp4
+
+gen-lang-client-0759593306-firebase-adminsdk-fbsvc-fb551e3f9f.json
+.env
