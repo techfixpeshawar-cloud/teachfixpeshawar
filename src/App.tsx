@@ -6,6 +6,7 @@
 
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { lazy, Suspense } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import { DataProvider, useData } from './context/DataContext';
 import { Navbar } from './components/Navbar';
 import { Footer } from './components/Footer';
@@ -212,6 +213,7 @@ export default function App() {
     <BrowserRouter>
       <DataProvider>
         <AppRoutes />
+        <Analytics />
       </DataProvider>
     </BrowserRouter>
   );
