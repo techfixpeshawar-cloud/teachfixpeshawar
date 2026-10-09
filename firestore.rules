@@ -1,4 +1,5 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -6,50 +7,83 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Verify administrator authority via custom auth claim, verified admin email, or user profile role
     function isAdmin() {
       return isAuth() && (
         request.auth.token.admin == true ||
         request.auth.token.email == 'ullahsafiullah117@gmail.com' ||
         request.auth.token.email == 'sullahjan40@gmail.com' ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+        )
       );
     }
 
-    // Services: Public visitors can only view published services; only admin can edit/publish/delete
+    // PUBLIC CONTENT
+
     match /services/{serviceId} {
-      allow read: if resource.data.status == 'PUBLISHED' || resource.data.status == 'published' || resource.data.status == 'active' || isAdmin();
+      allow read: if
+        resource.data.status == 'PUBLISHED' ||
+        resource.data.status == 'published' ||
+        resource.data.status == 'active' ||
+        isAdmin();
+
       allow write: if isAdmin();
     }
 
-    // FAQ: Public visitors can only view published FAQs; only admin can manage
     match /faq/{faqId} {
-      allow read: if resource.data.status == 'PUBLISHED' || resource.data.status == 'published' || resource.data.status == 'active' || isAdmin();
+      allow read: if
+        resource.data.status == 'PUBLISHED' ||
+        resource.data.status == 'published' ||
+        resource.data.status == 'active' ||
+        isAdmin();
+
       allow write: if isAdmin();
     }
 
-    // Real Service Cases: Public can only view published cases; only admin can manage
     match /caseStudies/{caseStudyId} {
-      allow read: if resource.data.status == 'PUBLISHED' || resource.data.status == 'published' || resource.data.status == 'active' || isAdmin();
+      allow read: if
+        resource.data.status == 'PUBLISHED' ||
+        resource.data.status == 'published' ||
+        resource.data.status == 'active' ||
+        isAdmin();
+
       allow write: if isAdmin();
     }
 
-    // Settings: Public can read general site config; sensitive server-only docs (email, admin_auth) strictly blocked from client SDK
+    // PAGE SECTIONS
+
+    match /page_sections/{sectionId} {
+      allow read: if
+        resource.data.status == 'PUBLISHED' ||
+        resource.data.status == 'published' ||
+        resource.data.status == 'active' ||
+        resource.data.published == true ||
+        isAdmin();
+
+      allow write: if isAdmin();
+    }
+
+    // SETTINGS
+
     match /settings/email {
-      allow read, write: if false; // Accessible ONLY via server-side Firebase Admin SDK
+      allow read, write: if false;
     }
 
     match /settings/admin_auth {
-      allow read, write: if false; // Accessible ONLY via server-side Firebase Admin SDK
+      allow read, write: if false;
     }
 
     match /settings/{settingId} {
-      allow read: if settingId != 'email' && settingId != 'admin_auth';
+      allow read: if
+        settingId != 'email' &&
+        settingId != 'admin_auth';
+
       allow write: if isAdmin();
     }
 
-    // Service Requests: Public can create requests & look up their own specific reference ID (get); only admin can list or update
+    // SERVICE REQUESTS
+
     match /serviceRequests/{requestId} {
       allow create: if true;
       allow get: if true;
@@ -64,7 +98,8 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
-    // Bookings: Public can create; only admin can list or update status
+    // BOOKINGS
+
     match /bookings/{bookingId} {
       allow create: if true;
       allow get: if true;
@@ -72,7 +107,8 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
-    // Inquiries: Public can submit; only admin can read and manage
+    // INQUIRIES / CONTACTS
+
     match /inquiries/{inquiryId} {
       allow create: if true;
       allow read, update, delete: if isAdmin();
@@ -83,27 +119,48 @@ service cloud.firestore {
       allow read, update, delete: if isAdmin();
     }
 
-    // Customers: Strictly private customer profiles; only admin can access
+    // CUSTOMERS
+
     match /customers/{customerId} {
       allow read, write: if isAdmin();
     }
 
-    // Media: Public can view assets; only admin can upload or delete
+    // MEDIA
+
     match /media/{mediaId} {
       allow read: if true;
       allow write: if isAdmin();
     }
 
-    // Activity Logs: Admin-only audit trail
+    // ACTIVITY LOGS
+
     match /activityLogs/{logId} {
       allow read: if isAdmin();
       allow create: if true;
     }
 
-    // User accounts management
+    // USERS
+
     match /users/{userId} {
-      allow read: if isAuth() && (request.auth.uid == userId || isAdmin());
-      allow write: if isAuth() && (request.auth.uid == userId || isAdmin());
+      allow read: if
+        isAuth() &&
+        (
+          request.auth.uid == userId ||
+          isAdmin()
+        );
+
+      allow write: if
+        isAuth() &&
+        (
+          request.auth.uid == userId ||
+          isAdmin()
+        );
+    }
+
+    // DEFAULT DENY
+
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
