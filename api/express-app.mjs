@@ -8,8 +8,6 @@ import nodemailer from "nodemailer";
 import { fileURLToPath } from "url";
 import { initializeApp as initFirebaseClientApp, getApps as getFirebaseApps } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } from "firebase/firestore";
-import { initializeApp as initFirebaseAdminApp, getApps as getFirebaseAdminApps } from "firebase-admin/app";
-import { getAuth as getFirebaseAdminAuth } from "firebase-admin/auth";
 process.env.TZ = "Asia/Karachi";
 var APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 function getPeshawarTimeString(date = /* @__PURE__ */ new Date()) {
@@ -66,19 +64,6 @@ function getFirestoreInstance() {
     return _firestoreDb;
   } catch (err) {
     console.error("[FIRESTORE] Init failed:", err);
-    return null;
-  }
-}
-var _adminAuth = null;
-function getFirebaseAdminAuthInstance() {
-  if (_adminAuth) return _adminAuth;
-  try {
-    const existingApps = getFirebaseAdminApps();
-    const app2 = existingApps.length ? existingApps[0] : initFirebaseAdminApp({ projectId: process.env.FIREBASE_PROJECT_ID || FIREBASE_CLIENT_CONFIG.projectId });
-    _adminAuth = getFirebaseAdminAuth(app2);
-    return _adminAuth;
-  } catch (err) {
-    console.warn("[FIREBASE ADMIN] Auth init note:", err?.message || err);
     return null;
   }
 }
@@ -2974,19 +2959,6 @@ app.post("/api/admin/login", authRateLimiter, async (req, res) => {
       const sessionToken = generateAdminSessionToken(emailFromToken);
       return res.json({ success: true, token: sessionToken });
     }
-    try {
-      const adminAuth = getFirebaseAdminAuthInstance();
-      if (adminAuth) {
-        const decoded = await adminAuth.verifyIdToken(idToken);
-        const emailLower = (decoded?.email || "").toLowerCase();
-        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === "admin")) {
-          const sessionToken = generateAdminSessionToken(decoded.email || "admin");
-          return res.json({ success: true, token: sessionToken });
-        }
-      }
-    } catch (tokenErr) {
-      console.warn("[AUTH] Firebase Admin token verify note:", tokenErr?.message);
-    }
     return res.status(401).json({ error: "Invalid or expired Firebase session. Please sign in again." });
   }
   const p = (password || "").toString().trim();
@@ -3026,17 +2998,6 @@ async function checkAdminAuth(req, res, next) {
     const emailFromToken = await verifyFirebaseIdTokenFallback(validToken);
     if (emailFromToken && AUTHORIZED_ADMIN_EMAILS.has(emailFromToken.toLowerCase())) {
       return next();
-    }
-    try {
-      const adminAuth = getFirebaseAdminAuthInstance();
-      if (adminAuth) {
-        const decoded = await adminAuth.verifyIdToken(validToken);
-        const emailLower = (decoded?.email || "").toLowerCase();
-        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === "admin")) {
-          return next();
-        }
-      }
-    } catch {
     }
   }
   return res.status(401).json({ error: "Unauthorized. Valid admin session token required." });

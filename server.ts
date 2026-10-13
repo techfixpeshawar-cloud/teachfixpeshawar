@@ -12,8 +12,6 @@ import { fileURLToPath } from 'url';
 // Removed static Vite import to prevent rollup-linux-x64-gnu runtime collisions on Vercel
 import { initializeApp as initFirebaseClientApp, getApps as getFirebaseApps } from 'firebase/app';
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
-import { initializeApp as initFirebaseAdminApp, getApps as getFirebaseAdminApps } from 'firebase-admin/app';
-import { getAuth as getFirebaseAdminAuth } from 'firebase-admin/auth';
 
 const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -87,22 +85,6 @@ function getFirestoreInstance() {
     return _firestoreDb;
   } catch (err) {
     console.error('[FIRESTORE] Init failed:', err);
-    return null;
-  }
-}
-
-let _adminAuth: any = null;
-function getFirebaseAdminAuthInstance() {
-  if (_adminAuth) return _adminAuth;
-  try {
-    const existingApps = getFirebaseAdminApps();
-    const app = existingApps.length
-      ? existingApps[0]
-      : initFirebaseAdminApp({ projectId: process.env.FIREBASE_PROJECT_ID || FIREBASE_CLIENT_CONFIG.projectId });
-    _adminAuth = getFirebaseAdminAuth(app);
-    return _adminAuth;
-  } catch (err) {
-    console.warn('[FIREBASE ADMIN] Auth init note:', (err as any)?.message || err);
     return null;
   }
 }
@@ -3337,27 +3319,12 @@ const AUTHORIZED_ADMIN_EMAILS = new Set([
 app.post('/api/admin/login', authRateLimiter, async (req, res) => {
   const { password, idToken, email } = req.body;
 
-  // 1. If Firebase ID Token is passed, verify it (Admin SDK or REST fallback)
+  // 1. If Firebase ID Token is passed, verify it natively
   if (idToken && typeof idToken === 'string') {
     const emailFromToken = await verifyFirebaseIdTokenFallback(idToken);
     if (emailFromToken && AUTHORIZED_ADMIN_EMAILS.has(emailFromToken.toLowerCase())) {
       const sessionToken = generateAdminSessionToken(emailFromToken);
       return res.json({ success: true, token: sessionToken });
-    }
-
-    // Also try Firebase Admin SDK (works when service account / ADC is available)
-    try {
-      const adminAuth = getFirebaseAdminAuthInstance();
-      if (adminAuth) {
-        const decoded = await adminAuth.verifyIdToken(idToken);
-        const emailLower = (decoded?.email || '').toLowerCase();
-        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === 'admin')) {
-          const sessionToken = generateAdminSessionToken(decoded.email || 'admin');
-          return res.json({ success: true, token: sessionToken });
-        }
-      }
-    } catch (tokenErr) {
-      console.warn('[AUTH] Firebase Admin token verify note:', (tokenErr as any)?.message);
     }
 
     // ID token was provided but could not be verified — reject early
@@ -3414,19 +3381,6 @@ async function checkAdminAuth(req: express.Request, res: express.Response, next:
     const emailFromToken = await verifyFirebaseIdTokenFallback(validToken);
     if (emailFromToken && AUTHORIZED_ADMIN_EMAILS.has(emailFromToken.toLowerCase())) {
       return next();
-    }
-
-    try {
-      const adminAuth = getFirebaseAdminAuthInstance();
-      if (adminAuth) {
-        const decoded = await adminAuth.verifyIdToken(validToken);
-        const emailLower = (decoded?.email || '').toLowerCase();
-        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === 'admin')) {
-          return next();
-        }
-      }
-    } catch {
-      // Token verification failed or expired
     }
   }
 
