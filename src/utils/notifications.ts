@@ -4,6 +4,7 @@ import { formatPKTDateTime } from './dateTime';
 export interface EmailNotificationPayload {
   to_email: string;
   customer_name: string;
+  customer_email: string;
   customer_phone: string;
   customer_whatsapp: string;
   area: string;
@@ -42,6 +43,7 @@ export async function sendServiceNotificationEmail(
   const emailPayload: EmailNotificationPayload = {
     to_email: TARGET_EMAIL,
     customer_name: request.fullName || 'Anonymous Customer',
+    customer_email: request.email || 'Not provided',
     customer_phone: request.phone || 'Not provided',
     customer_whatsapp: request.whatsapp || request.phone || 'Not provided',
     area: request.area || 'Peshawar',
@@ -63,6 +65,7 @@ export async function sendServiceNotificationEmail(
 ---------------------------------------------------------
 CUSTOMER INFORMATION:
 • Name: ${emailPayload.customer_name}
+• Email: ${emailPayload.customer_email}
 • Phone: ${emailPayload.customer_phone}
 • WhatsApp: ${emailPayload.customer_whatsapp}
 • Location / Area: ${emailPayload.area} (Peshawar)
