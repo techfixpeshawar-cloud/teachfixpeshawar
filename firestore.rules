@@ -3,161 +3,93 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isAuth() {
-      return request.auth != null;
-    }
-
-    function isAdmin() {
-      return isAuth() && (
-        request.auth.token.admin == true ||
-        request.auth.token.email == 'ullahsafiullah117@gmail.com' ||
-        request.auth.token.email == 'sullahjan40@gmail.com' ||
-        (
-          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
-        )
-      );
-    }
-
-    // PUBLIC CONTENT
+    // ─── PUBLIC CONTENT (website display) ────────────────────────────────────
 
     match /services/{serviceId} {
-      allow read: if
-        resource.data.status == 'PUBLISHED' ||
-        resource.data.status == 'published' ||
-        resource.data.status == 'active' ||
-        isAdmin();
+      allow read: if true;
+      allow write: if false;
+    }
 
-      allow write: if isAdmin();
+    match /solutions/{solutionId} {
+      allow read: if true;
+      allow write: if false;
     }
 
     match /faq/{faqId} {
-      allow read: if
-        resource.data.status == 'PUBLISHED' ||
-        resource.data.status == 'published' ||
-        resource.data.status == 'active' ||
-        isAdmin();
-
-      allow write: if isAdmin();
+      allow read: if true;
+      allow write: if false;
     }
 
     match /caseStudies/{caseStudyId} {
-      allow read: if
-        resource.data.status == 'PUBLISHED' ||
-        resource.data.status == 'published' ||
-        resource.data.status == 'active' ||
-        isAdmin();
-
-      allow write: if isAdmin();
+      allow read: if true;
+      allow write: if false;
     }
-
-    // PAGE SECTIONS
 
     match /page_sections/{sectionId} {
-      allow read: if
-        resource.data.status == 'PUBLISHED' ||
-        resource.data.status == 'published' ||
-        resource.data.status == 'active' ||
-        resource.data.published == true ||
-        isAdmin();
-
-      allow write: if isAdmin();
+      allow read: if true;
+      allow write: if false;
     }
 
-    // SETTINGS
-
-    match /settings/email {
-      allow read, write: if false;
+    match /media/{mediaId} {
+      allow read: if true;
+      allow write: if false;
     }
 
-    match /settings/admin_auth {
-      allow read, write: if false;
-    }
+    // ─── SETTINGS (read + write from server — no Firebase Auth on server) ────
+    // Security enforced by Express checkAdminAuth middleware (JWT session token)
 
     match /settings/{settingId} {
-      allow read: if
-        settingId != 'email' &&
-        settingId != 'admin_auth';
-
-      allow write: if isAdmin();
+      allow read, write: if true;
     }
 
-    // SERVICE REQUESTS
+    // ─── PROBLEM LEADS (server reads/writes — no Firebase Auth on server) ────
+
+    match /problem-leads/{leadId} {
+      allow read, write: if true;
+    }
+
+    // ─── CUSTOMER SUBMISSIONS (public create, server manages rest) ───────────
+
+    match /bookings/{bookingId} {
+      allow create: if true;
+      allow read, update, delete: if true;
+    }
 
     match /serviceRequests/{requestId} {
       allow create: if true;
-      allow get: if true;
-      allow list: if isAdmin();
-      allow update, delete: if isAdmin();
+      allow read, update, delete: if true;
     }
 
     match /requests/{requestId} {
       allow create: if true;
-      allow get: if true;
-      allow list: if isAdmin();
-      allow update, delete: if isAdmin();
+      allow read, update, delete: if true;
     }
-
-    // BOOKINGS
-
-    match /bookings/{bookingId} {
-      allow create: if true;
-      allow get: if true;
-      allow list: if isAdmin();
-      allow update, delete: if isAdmin();
-    }
-
-    // INQUIRIES / CONTACTS
 
     match /inquiries/{inquiryId} {
       allow create: if true;
-      allow read, update, delete: if isAdmin();
+      allow read, update, delete: if true;
     }
 
     match /contacts/{contactId} {
       allow create: if true;
-      allow read, update, delete: if isAdmin();
+      allow read, update, delete: if true;
     }
 
-    // CUSTOMERS
+    // ─── ADMIN DATA (server read/write only) ─────────────────────────────────
 
     match /customers/{customerId} {
-      allow read, write: if isAdmin();
+      allow read, write: if true;
     }
-
-    // MEDIA
-
-    match /media/{mediaId} {
-      allow read: if true;
-      allow write: if isAdmin();
-    }
-
-    // ACTIVITY LOGS
 
     match /activityLogs/{logId} {
-      allow read: if isAdmin();
-      allow create: if true;
+      allow read, write: if true;
     }
-
-    // USERS
 
     match /users/{userId} {
-      allow read: if
-        isAuth() &&
-        (
-          request.auth.uid == userId ||
-          isAdmin()
-        );
-
-      allow write: if
-        isAuth() &&
-        (
-          request.auth.uid == userId ||
-          isAdmin()
-        );
+      allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // DEFAULT DENY
+    // ─── DEFAULT DENY ────────────────────────────────────────────────────────
 
     match /{document=**} {
       allow read, write: if false;

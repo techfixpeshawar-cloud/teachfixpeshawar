@@ -266,6 +266,88 @@ async function loadProblemSolutionsFromFirestore() {
   }
   return null;
 }
+async function saveBookingToFirestore(booking) {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !booking?.id) return;
+    const clean = {};
+    for (const [k, v] of Object.entries(booking)) {
+      if (typeof v !== "function" && typeof v !== "undefined") clean[k] = v;
+    }
+    const cleanDoc = { ...clean, _updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    await Promise.all([
+      setDoc(doc(fsDb, "requests", String(booking.id)), cleanDoc, { merge: true }),
+      setDoc(doc(fsDb, "bookings", String(booking.id)), cleanDoc, { merge: true }),
+      setDoc(doc(fsDb, "serviceRequests", String(booking.id)), cleanDoc, { merge: true })
+    ]);
+    console.log(`[FIRESTORE] \u2705 Booking saved: ${booking.id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] \u274C Booking save failed (${booking?.id}):`, err);
+  }
+}
+async function saveInquiryToFirestore(inquiry) {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !inquiry?.id) return;
+    const clean = {};
+    for (const [k, v] of Object.entries(inquiry)) {
+      if (typeof v !== "function" && typeof v !== "undefined") clean[k] = v;
+    }
+    await setDoc(doc(fsDb, "inquiries", String(inquiry.id)), {
+      ...clean,
+      _updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    }, { merge: true });
+    console.log(`[FIRESTORE] \u2705 Inquiry saved: ${inquiry.id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] \u274C Inquiry save failed (${inquiry?.id}):`, err);
+  }
+}
+async function loadInquiriesFromFirestore() {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return [];
+    const colRef = collection(fsDb, "inquiries");
+    const snap = await getDocs(colRef);
+    if (!snap.empty) {
+      const items = [];
+      snap.docs.forEach((d) => {
+        const data = d.data();
+        if (data.type !== "problem-lead" && !d.id.startsWith("LEAD-PRB-")) {
+          const item = { id: d.id, ...data };
+          delete item._updatedAt;
+          items.push(item);
+        }
+      });
+      items.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      return items;
+    }
+  } catch (err) {
+    console.error("[FIRESTORE] \u274C Inquiries load failed:", err);
+  }
+  return [];
+}
+async function loadBookingsFromFirestore() {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return [];
+    const colRef = collection(fsDb, "requests");
+    const snap = await getDocs(colRef);
+    if (!snap.empty) {
+      const items = [];
+      snap.docs.forEach((d) => {
+        const data = d.data();
+        const item = { id: d.id, ...data };
+        delete item._updatedAt;
+        items.push(item);
+      });
+      items.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      return items;
+    }
+  } catch (err) {
+    console.error("[FIRESTORE] \u274C Bookings load failed:", err);
+  }
+  return [];
+}
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "SAMEORIGIN");
@@ -2067,6 +2149,16 @@ var firestoreReady = new Promise((resolve) => {
       db.problemLeads = firestoreLeads;
       console.log(`[FIRESTORE] \u2705 db.problemLeads overlaid (${firestoreLeads.length} items) from Firestore on startup`);
     }
+    const firestoreInquiries = await loadInquiriesFromFirestore();
+    if (Array.isArray(firestoreInquiries) && firestoreInquiries.length > 0) {
+      db.inquiries = firestoreInquiries;
+      console.log(`[FIRESTORE] \u2705 db.inquiries overlaid (${firestoreInquiries.length} items) from Firestore on startup`);
+    }
+    const firestoreBookings = await loadBookingsFromFirestore();
+    if (Array.isArray(firestoreBookings) && firestoreBookings.length > 0) {
+      db.bookings = firestoreBookings;
+      console.log(`[FIRESTORE] \u2705 db.bookings overlaid (${firestoreBookings.length} items) from Firestore on startup`);
+    }
   } catch (err) {
     console.error("[FIRESTORE] Startup overlay error:", err);
   } finally {
@@ -2197,7 +2289,7 @@ function validateProblemDescription(desc) {
   }
   return { valid: true, clean };
 }
-app.post("/api/bookings", publicApiRateLimiter, (req, res) => {
+app.post("/api/bookings", publicApiRateLimiter, async (req, res) => {
   const {
     fullName,
     email,
@@ -2570,6 +2662,10 @@ Helpline / WhatsApp: +92 327 5226107
     user: "System Notification Trigger"
   });
   saveDb();
+  await Promise.all([
+    saveBookingToFirestore(newBooking),
+    saveInquiryToFirestore(newLead)
+  ]).catch((err) => console.error("[FIRESTORE] Booking/lead write catch:", err));
   res.status(201).json({
     success: true,
     booking: newBooking,
@@ -2717,6 +2813,7 @@ async function handleInquirySubmission(req, res) {
   });
   if (db.activityLogs.length > 100) db.activityLogs.pop();
   saveDb();
+  await saveInquiryToFirestore(newInquiry).catch((err) => console.error("[FIRESTORE] Inquiry save catch:", err));
   return res.status(201).json({
     success: true,
     inquiry: newInquiry,
@@ -2734,7 +2831,19 @@ app.get("/api/contact", (req, res) => {
 });
 async function handleResendInquiryEmail(req, res) {
   const { id } = req.params;
-  const inquiry = (db.inquiries || []).find((inq) => inq.id === id);
+  let inquiry = (db.inquiries || []).find((inq) => inq.id === id);
+  if (!inquiry) {
+    try {
+      const fsDb = getFirestoreInstance();
+      if (fsDb) {
+        const snap = await getDoc(doc(fsDb, "inquiries", String(id)));
+        if (snap.exists()) {
+          inquiry = { id: snap.id, ...snap.data() };
+        }
+      }
+    } catch (_) {
+    }
+  }
   if (!inquiry) {
     return res.status(404).json({ error: "Inquiry not found" });
   }
@@ -3004,10 +3113,20 @@ async function checkAdminAuth(req, res, next) {
 }
 app.get("/api/admin/data", checkAdminAuth, async (req, res) => {
   try {
-    const firestoreSettings = await loadSettingsFromFirestore();
+    const [firestoreSettings, firestoreInquiries, firestoreBookings] = await Promise.all([
+      loadSettingsFromFirestore().catch(() => null),
+      loadInquiriesFromFirestore().catch(() => []),
+      loadBookingsFromFirestore().catch(() => [])
+    ]);
     if (firestoreSettings && typeof firestoreSettings === "object" && Object.keys(firestoreSettings).length > 0) {
       db.settings = { ...db.settings, ...firestoreSettings };
       NOTIFICATION_DESTINATION = getNotificationDestination();
+    }
+    if (Array.isArray(firestoreInquiries) && firestoreInquiries.length > 0) {
+      db.inquiries = firestoreInquiries;
+    }
+    if (Array.isArray(firestoreBookings) && firestoreBookings.length > 0) {
+      db.bookings = firestoreBookings;
     }
   } catch (err) {
     console.error("[FIRESTORE] Admin data GET overlay error:", err);

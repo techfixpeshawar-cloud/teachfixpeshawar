@@ -419,7 +419,7 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm text-white">{inq.fullName}</span>
+                        <span className="font-bold text-sm text-white">{inq.fullName || (inq as any).name || 'Valued Customer'}</span>
                         <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
                           inq.status === 'NEW'
                             ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
@@ -432,7 +432,7 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
                           {inq.status}
                         </span>
                       </div>
-                      <p className="text-xs text-blue-300 font-medium mt-0.5">{inq.subject}</p>
+                      <p className="text-xs text-blue-300 font-medium mt-0.5">{inq.subject || inq.service || 'Service Inquiry'}</p>
                     </div>
 
                     {/* Email Delivery Telemetry Badge */}
@@ -461,7 +461,7 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
 
                   {/* Snippet */}
                   <p className="text-xs text-slate-300 line-clamp-2 leading-relaxed bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/60 font-sans">
-                    {inq.message}
+                    {inq.message || (inq as any).problemDescription || 'No description provided'}
                   </p>
 
                   {/* Metadata Row */}
@@ -469,7 +469,7 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
                     <div className="flex items-center gap-3">
                       <span className="flex items-center gap-1 text-slate-300">
                         <Phone className="h-3 w-3 text-blue-400" />
-                        {inq.phone}
+                        {inq.phone || (inq as any).whatsapp || (inq as any).phoneNumber || 'Not provided'}
                       </span>
                       {inq.area && (
                         <span className="flex items-center gap-1 text-slate-400">
@@ -586,8 +586,8 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
             <div className="flex items-start justify-between gap-4 border-b border-slate-800/80 pb-4">
               <div>
                 <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider block">LEAD DETAILS</span>
-                <h3 className="text-lg font-bold text-white mt-0.5">{selectedInquiry.fullName}</h3>
-                <p className="text-xs text-blue-400 font-medium">{selectedInquiry.subject}</p>
+                <h3 className="text-lg font-bold text-white mt-0.5">{selectedInquiry.fullName || (selectedInquiry as any).name || 'Valued Customer'}</h3>
+                <p className="text-xs text-blue-400 font-medium">{selectedInquiry.subject || selectedInquiry.service || 'Service Inquiry'}</p>
               </div>
 
               <div className="flex items-center gap-2">
@@ -970,16 +970,20 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
                 <span className="text-slate-500 text-[10px] font-mono block">PHONE NUMBER</span>
-                <a href={`tel:${selectedInquiry.phone}`} className="text-blue-400 font-bold hover:underline mt-0.5 block">
-                  {selectedInquiry.phone}
-                </a>
+                {selectedInquiry.phone || (selectedInquiry as any).whatsapp || (selectedInquiry as any).phoneNumber ? (
+                  <a href={`tel:${selectedInquiry.phone || (selectedInquiry as any).whatsapp || (selectedInquiry as any).phoneNumber}`} className="text-blue-400 font-bold hover:underline mt-0.5 block">
+                    {selectedInquiry.phone || (selectedInquiry as any).whatsapp || (selectedInquiry as any).phoneNumber}
+                  </a>
+                ) : (
+                  <span className="text-slate-400 mt-0.5 block">Not provided</span>
+                )}
               </div>
 
               <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
                 <span className="text-slate-500 text-[10px] font-mono block">EMAIL ADDRESS</span>
-                {selectedInquiry.email ? (
-                  <a href={`mailto:${selectedInquiry.email}`} className="text-blue-400 font-medium hover:underline mt-0.5 truncate block">
-                    {selectedInquiry.email}
+                {selectedInquiry.email || (selectedInquiry as any).customerEmail || (selectedInquiry as any).customer_email ? (
+                  <a href={`mailto:${selectedInquiry.email || (selectedInquiry as any).customerEmail || (selectedInquiry as any).customer_email}`} className="text-blue-400 font-medium hover:underline mt-0.5 truncate block">
+                    {selectedInquiry.email || (selectedInquiry as any).customerEmail || (selectedInquiry as any).customer_email}
                   </a>
                 ) : (
                   <span className="text-slate-400 mt-0.5 block">Not provided</span>
@@ -1001,7 +1005,7 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
             <div className="space-y-1.5">
               <label className="text-xs font-mono text-slate-400 block">CLIENT MESSAGE / PROBLEM DESCRIPTION</label>
               <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap">
-                {selectedInquiry.message}
+                {selectedInquiry.message || (selectedInquiry as any).problemDescription || 'No message provided'}
               </div>
             </div>
 
