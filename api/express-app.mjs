@@ -11,6 +11,7 @@ var _app = null;
 var _firestore = null;
 var _auth = null;
 var _hasServiceAccount = false;
+var DEFAULT_PROJECT_ID = "techfixpeshawar-01023";
 function initFirebaseAdmin() {
   if (_app && _firestore && _auth) {
     return { app: _app, db: _firestore, auth: _auth };
@@ -31,7 +32,7 @@ function initFirebaseAdmin() {
       }
     }
     if (!_app) {
-      const projectId2 = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306").trim();
+      const projectId2 = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || DEFAULT_PROJECT_ID).trim();
       const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || "").trim();
       let privateKey = (process.env.FIREBASE_PRIVATE_KEY || "").trim();
       if (clientEmail && privateKey) {
@@ -41,11 +42,7 @@ function initFirebaseAdmin() {
           }
           privateKey = privateKey.replace(/\\n/g, "\n");
           _app = initializeApp({
-            credential: cert({
-              projectId: projectId2,
-              clientEmail,
-              privateKey
-            })
+            credential: cert({ projectId: projectId2, clientEmail, privateKey })
           });
           _hasServiceAccount = true;
         } catch (err) {
@@ -54,11 +51,11 @@ function initFirebaseAdmin() {
       }
     }
     if (!_app) {
-      const projectId2 = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306").trim();
+      const projectId2 = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || DEFAULT_PROJECT_ID).trim();
       _app = initializeApp({ projectId: projectId2 });
     }
   }
-  const dbId = (process.env.FIREBASE_DATABASE_ID || process.env.VITE_FIREBASE_DATABASE_ID || "ai-studio-peshawaronsitete-70e75457-6a23-4284-84ee-9bd0ef9c4555").trim();
+  const dbId = (process.env.FIREBASE_DATABASE_ID || process.env.VITE_FIREBASE_DATABASE_ID || "").trim();
   try {
     _firestore = dbId ? getFirestore(_app, dbId) : getFirestore(_app);
   } catch (err) {
@@ -66,14 +63,12 @@ function initFirebaseAdmin() {
     _firestore = getFirestore(_app);
   }
   _auth = getAuth(_app);
-  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306").trim();
-  console.log(`[FIREBASE ADMIN] Initialized. Project: ${projectId} | Named DB: ${dbId || "(default)"} | Service Account Auth: ${_hasServiceAccount}`);
+  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || DEFAULT_PROJECT_ID).trim();
+  console.log(`[FIREBASE ADMIN] Initialized. Project: ${projectId} | DB: ${dbId || "(default)"} | Service Account: ${_hasServiceAccount}`);
   return { app: _app, db: _firestore, auth: _auth };
 }
 function getAdminFirestore() {
-  if (!_firestore) {
-    initFirebaseAdmin();
-  }
+  if (!_firestore) initFirebaseAdmin();
   return _firestore;
 }
 
@@ -1425,3 +1420,4 @@ export {
   sendNotificationEmail,
   verifyAdminSessionToken
 };
+//# sourceMappingURL=express-app.mjs.map

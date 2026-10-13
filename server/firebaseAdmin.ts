@@ -7,6 +7,9 @@ let _firestore: Firestore | null = null;
 let _auth: Auth | null = null;
 let _hasServiceAccount = false;
 
+// New Firebase project — fallback used only if env vars are not set
+const DEFAULT_PROJECT_ID = 'techfixpeshawar-01023';
+
 export function initFirebaseAdmin(): { app: App; db: Firestore; auth: Auth } {
   if (_app && _firestore && _auth) {
     return { app: _app, db: _firestore, auth: _auth };
@@ -14,9 +17,9 @@ export function initFirebaseAdmin(): { app: App; db: Firestore; auth: Auth } {
 
   const existingApps = getApps();
   if (existingApps.length > 0) {
-    _app = existingApps[0];
+    _app = existingApps[0] as App;
   } else {
-    // 1. Try FIREBASE_SERVICE_ACCOUNT_BASE64
+    // 1. Try FIREBASE_SERVICE_ACCOUNT_BASE64 (recommended for Vercel)
     const base64Sa = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64?.trim();
     if (base64Sa) {
       try {
@@ -29,30 +32,24 @@ export function initFirebaseAdmin(): { app: App; db: Firestore; auth: Auth } {
       }
     }
 
-    // 2. Try individual FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY + FIREBASE_PROJECT_ID
+    // 2. Try individual FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY
     if (!_app) {
       const projectId = (
         process.env.FIREBASE_PROJECT_ID ||
         process.env.VITE_FIREBASE_PROJECT_ID ||
-        'gen-lang-client-0759593306'
+        DEFAULT_PROJECT_ID
       ).trim();
       const clientEmail = (process.env.FIREBASE_CLIENT_EMAIL || '').trim();
       let privateKey = (process.env.FIREBASE_PRIVATE_KEY || '').trim();
 
       if (clientEmail && privateKey) {
         try {
-          // Normalize line breaks in private key
           if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
             privateKey = privateKey.slice(1, -1);
           }
           privateKey = privateKey.replace(/\\n/g, '\n');
-
           _app = initializeApp({
-            credential: cert({
-              projectId,
-              clientEmail,
-              privateKey,
-            }),
+            credential: cert({ projectId, clientEmail, privateKey }),
           });
           _hasServiceAccount = true;
         } catch (err: any) {
@@ -61,23 +58,22 @@ export function initFirebaseAdmin(): { app: App; db: Firestore; auth: Auth } {
       }
     }
 
-    // 3. Fallback: Initialize with project ID (uses Application Default Credentials on GCP/Cloud Run or basic configuration)
+    // 3. Fallback: project ID only (works with GOOGLE_APPLICATION_CREDENTIALS env var)
     if (!_app) {
       const projectId = (
         process.env.FIREBASE_PROJECT_ID ||
         process.env.VITE_FIREBASE_PROJECT_ID ||
-        'gen-lang-client-0759593306'
+        DEFAULT_PROJECT_ID
       ).trim();
-
       _app = initializeApp({ projectId });
     }
   }
 
-  // Obtain Firestore instance (supports named database if configured)
+  // Firestore — use default database (new project uses default DB, not a named one)
   const dbId = (
     process.env.FIREBASE_DATABASE_ID ||
     process.env.VITE_FIREBASE_DATABASE_ID ||
-    'ai-studio-peshawaronsitete-70e75457-6a23-4284-84ee-9bd0ef9c4555'
+    ''
   ).trim();
 
   try {
@@ -87,26 +83,21 @@ export function initFirebaseAdmin(): { app: App; db: Firestore; auth: Auth } {
     _firestore = getFirestore(_app);
   }
 
-  // Obtain Auth instance
   _auth = getAuth(_app);
 
-  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || 'gen-lang-client-0759593306').trim();
-  console.log(`[FIREBASE ADMIN] Initialized. Project: ${projectId} | Named DB: ${dbId || '(default)'} | Service Account Auth: ${_hasServiceAccount}`);
+  const projectId = (process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || DEFAULT_PROJECT_ID).trim();
+  console.log(`[FIREBASE ADMIN] Initialized. Project: ${projectId} | DB: ${dbId || '(default)'} | Service Account: ${_hasServiceAccount}`);
 
   return { app: _app, db: _firestore, auth: _auth };
 }
 
 export function getAdminFirestore(): Firestore {
-  if (!_firestore) {
-    initFirebaseAdmin();
-  }
+  if (!_firestore) initFirebaseAdmin();
   return _firestore!;
 }
 
 export function getAdminAuth(): Auth {
-  if (!_auth) {
-    initFirebaseAdmin();
-  }
+  if (!_auth) initFirebaseAdmin();
   return _auth!;
 }
 

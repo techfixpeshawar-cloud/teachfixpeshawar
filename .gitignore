@@ -14,3 +14,6 @@ download.mp4
 gen-lang-client-0759593306-firebase-adminsdk-fbsvc-fb551e3f9f.json
 .env
 .vercel
+.agents/
+skills-lock.json
+lib/
