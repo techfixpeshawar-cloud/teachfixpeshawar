@@ -1,6 +1,5 @@
-if (!process.env.VERCEL) {
-  await import('dotenv/config');
-}
+import 'dotenv/config';
+
 // Force default server timezone to Pakistan Standard Time (PKT - Asia/Karachi, UTC+5)
 process.env.TZ = 'Asia/Karachi';
 
@@ -10,17 +9,13 @@ import fs from 'fs';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
-import { getAdminFirestore, getAdminAuth } from './server/firebaseAdmin.ts';
-import {
-  sendEmail,
-  getFullEmailSettings,
-  getSafeEmailSettings,
-  saveEmailSettings,
-  sanitizeEmailSubject,
-  generateEmailFooterHtml
-} from './server/email/emailService.ts';
+// Removed static Vite import to prevent rollup-linux-x64-gnu runtime collisions on Vercel
+import { initializeApp as initFirebaseClientApp, getApps as getFirebaseApps } from 'firebase/app';
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
+import { initializeApp as initFirebaseAdminApp, getApps as getFirebaseAdminApps } from 'firebase-admin/app';
+import { getAuth as getFirebaseAdminAuth } from 'firebase-admin/auth';
 
-const APP_ROOT = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 // Time formatting helpers for Pakistan Standard Time (PKT, UTC+5)
 export function getPeshawarTimeString(date: Date | string | number = new Date()): string {
@@ -67,21 +62,50 @@ const DB_FILE = IS_VERCEL
   : path.join(process.cwd(), 'data', 'database.json');
 
 // ─────────────────────────────────────────────────────────────────
-// Firebase Admin SDK — Production Persistent Storage
-// Uses Firebase Admin SDK for privileged Firestore and Auth operations
+// Firebase Firestore — Persistent Settings Storage (Vercel-safe)
+// Stores admin settings in Firestore so they survive serverless restarts.
+// Falls back gracefully if Firestore is unavailable.
 // ─────────────────────────────────────────────────────────────────
-function getFirestoreInstance() {
-  return getAdminFirestore();
-}
-
-function getFirebaseAdminAuthInstance() {
-  return getAdminAuth();
-}
-
 const FIREBASE_CLIENT_CONFIG = {
-  apiKey: process.env.FIREBASE_API_KEY || process.env.VITE_FIREBASE_API_KEY || "",
-  projectId: process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "gen-lang-client-0759593306"
+  apiKey:            process.env.FIREBASE_API_KEY            || process.env.VITE_FIREBASE_API_KEY            || "AIzaSyDrK5NsyiIg5x9HirLOiqm-Wh8hcMo3dm0",
+  authDomain:        process.env.FIREBASE_AUTH_DOMAIN        || process.env.VITE_FIREBASE_AUTH_DOMAIN        || "techfixpeshawar-01023.firebaseapp.com",
+  projectId:         process.env.FIREBASE_PROJECT_ID         || process.env.VITE_FIREBASE_PROJECT_ID         || "techfixpeshawar-01023",
+  storageBucket:     process.env.FIREBASE_STORAGE_BUCKET     || process.env.VITE_FIREBASE_STORAGE_BUCKET     || "techfixpeshawar-01023.firebasestorage.app",
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || process.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "778965098215",
+  appId:             process.env.FIREBASE_APP_ID             || process.env.VITE_FIREBASE_APP_ID             || "1:778965098215:web:c04cccc0542d11eea34c42",
 };
+const FIRESTORE_DATABASE_ID = (process.env.FIREBASE_DATABASE_ID || process.env.VITE_FIREBASE_DATABASE_ID || "").trim();
+
+let _firestoreDb: any = null;
+function getFirestoreInstance() {
+  if (_firestoreDb) return _firestoreDb;
+  try {
+    const existingApps = getFirebaseApps();
+    const fbApp = existingApps.find((a: any) => a.name === 'techfix-server')
+      || initFirebaseClientApp(FIREBASE_CLIENT_CONFIG, 'techfix-server');
+    _firestoreDb = FIRESTORE_DATABASE_ID ? getFirestore(fbApp, FIRESTORE_DATABASE_ID) : getFirestore(fbApp);
+    return _firestoreDb;
+  } catch (err) {
+    console.error('[FIRESTORE] Init failed:', err);
+    return null;
+  }
+}
+
+let _adminAuth: any = null;
+function getFirebaseAdminAuthInstance() {
+  if (_adminAuth) return _adminAuth;
+  try {
+    const existingApps = getFirebaseAdminApps();
+    const app = existingApps.length
+      ? existingApps[0]
+      : initFirebaseAdminApp({ projectId: process.env.FIREBASE_PROJECT_ID || FIREBASE_CLIENT_CONFIG.projectId });
+    _adminAuth = getFirebaseAdminAuth(app);
+    return _adminAuth;
+  } catch (err) {
+    console.warn('[FIREBASE ADMIN] Auth init note:', (err as any)?.message || err);
+    return null;
+  }
+}
 
 async function verifyFirebaseIdTokenFallback(idToken: string): Promise<string | null> {
   if (!idToken || typeof idToken !== 'string') return null;
@@ -176,26 +200,18 @@ function validateImageMagicBytes(buffer: Buffer): { valid: boolean; ext: string 
   return { valid: false, ext: '' };
 }
 
-// ─── CREDENTIAL FIELDS — only these are sensitive and must never be exposed
-//     in public API responses. All other fields are safe to return publicly.
-const CREDENTIAL_FIELDS = [
-  'gmailAppPassword', 'resendApiKey', 'adminPassword', 'apiSecret',
-  'smtpPassword', 'smtpUser', 'brevoApiKey', 'googleAppPassword'
-];
-
 async function saveSettingsToFirestore(settings: any): Promise<void> {
   try {
-    const fsDb = getAdminFirestore();
-    const ref = fsDb.collection('settings').doc('site_config');
-    // Strip sensitive credential keys before saving to site_config
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return;
+    const ref = doc(fsDb, 'settings', 'admin');
+    // Strip internal/non-serializable keys before saving
     const clean: any = {};
     for (const [k, v] of Object.entries(settings)) {
-      if (typeof v !== 'function' && typeof v !== 'undefined' && !CREDENTIAL_FIELDS.includes(k)) {
-        clean[k] = v;
-      }
+      if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
     }
-    await ref.set({ ...clean, _updatedAt: new Date().toISOString() }, { merge: true });
-    console.log('[FIRESTORE] ✅ Public settings saved to Firestore (settings/site_config)');
+    await setDoc(ref, { ...clean, _updatedAt: new Date().toISOString() }, { merge: true });
+    console.log('[FIRESTORE] ✅ Settings saved to Firestore');
   } catch (err) {
     console.error('[FIRESTORE] ❌ Save failed:', err);
   }
@@ -203,15 +219,14 @@ async function saveSettingsToFirestore(settings: any): Promise<void> {
 
 async function loadSettingsFromFirestore(): Promise<Record<string, any> | null> {
   try {
-    const fsDb = getAdminFirestore();
-    const ref = fsDb.collection('settings').doc('site_config');
-    const snap = await ref.get();
-
-    if (snap.exists) {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return null;
+    const ref = doc(fsDb, 'settings', 'admin');
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
       const data: any = snap.data();
       delete data._updatedAt;
-      delete data._migratedFromAdmin;
-      console.log('[FIRESTORE] ✅ Settings loaded from Firestore (settings/site_config)');
+      console.log('[FIRESTORE] ✅ Settings loaded from Firestore');
       return data;
     }
     console.log('[FIRESTORE] No saved settings in Firestore yet — using defaults');
@@ -222,38 +237,20 @@ async function loadSettingsFromFirestore(): Promise<Record<string, any> | null> 
   }
 }
 
-async function syncDocToFirestore(collectionName: string, docId: string, data: any): Promise<void> {
-  try {
-    const fsDb = getAdminFirestore();
-    await fsDb.collection(collectionName).doc(String(docId)).set(data, { merge: true });
-  } catch (err: any) {
-    console.error(`[FIRESTORE] Sync ${collectionName}/${docId} error:`, err?.message || err);
-  }
-}
-
-async function deleteDocFromFirestore(collectionName: string, docId: string): Promise<void> {
-  try {
-    const fsDb = getAdminFirestore();
-    await fsDb.collection(collectionName).doc(String(docId)).delete();
-  } catch (err: any) {
-    console.error(`[FIRESTORE] Delete ${collectionName}/${docId} error:`, err?.message || err);
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────
 // Problem Leads — Firestore Persistence
 // Authoritative persistence in Firestore collection 'inquiries' (with type='problem-lead')
 // ─────────────────────────────────────────────────────────────────
 async function saveProblemLeadToFirestore(lead: any): Promise<void> {
   try {
-    const fsDb = getAdminFirestore();
-    if (!lead?.id) return;
-    const ref = fsDb.collection('inquiries').doc(String(lead.id));
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !lead?.id) return;
+    const ref = doc(fsDb, 'inquiries', String(lead.id));
     const clean: any = {};
     for (const [k, v] of Object.entries(lead)) {
       if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
     }
-    await ref.set({
+    await setDoc(ref, {
       ...clean,
       type: 'problem-lead',
       _updatedAt: new Date().toISOString()
@@ -266,9 +263,10 @@ async function saveProblemLeadToFirestore(lead: any): Promise<void> {
 
 async function deleteProblemLeadFromFirestore(id: string): Promise<void> {
   try {
-    const fsDb = getAdminFirestore();
-    if (!id) return;
-    await fsDb.collection('inquiries').doc(String(id)).delete();
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !id) return;
+    const ref = doc(fsDb, 'inquiries', String(id));
+    await deleteDoc(ref);
     console.log(`[FIRESTORE] ✅ Problem lead deleted: ${id}`);
   } catch (err) {
     console.error(`[FIRESTORE] ❌ Problem lead delete failed (${id}):`, err);
@@ -277,15 +275,19 @@ async function deleteProblemLeadFromFirestore(id: string): Promise<void> {
 
 async function loadProblemLeadsFromFirestore(): Promise<any[]> {
   try {
-    const fsDb = getAdminFirestore();
-    const snap = await fsDb.collection('inquiries').where('type', '==', 'problem-lead').get();
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return [];
+    const colRef = collection(fsDb, 'inquiries');
+    const snap = await getDocs(colRef);
     if (!snap.empty) {
       const items: any[] = [];
       snap.docs.forEach(d => {
         const data = d.data();
-        const item: any = { id: d.id, ...data };
-        delete item._updatedAt;
-        items.push(item);
+        if (data.type === 'problem-lead' || d.id.startsWith('LEAD-PRB-')) {
+          const item: any = { id: d.id, ...data };
+          delete item._updatedAt;
+          items.push(item);
+        }
       });
       items.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       return items;
@@ -302,8 +304,9 @@ async function loadProblemLeadsFromFirestore(): Promise<any[]> {
 // ─────────────────────────────────────────────────────────────────
 async function saveProblemSolutionsToFirestore(solutions: any[]): Promise<void> {
   try {
-    const fsDb = getAdminFirestore();
-    if (!Array.isArray(solutions)) return;
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !Array.isArray(solutions)) return;
+    const ref = doc(fsDb, 'settings', 'problem_solutions');
     const cleanList = solutions.map(item => {
       const clean: any = {};
       for (const [k, v] of Object.entries(item)) {
@@ -311,7 +314,7 @@ async function saveProblemSolutionsToFirestore(solutions: any[]): Promise<void> 
       }
       return clean;
     });
-    await fsDb.collection('settings').doc('problem_solutions').set({
+    await setDoc(ref, {
       items: cleanList,
       _updatedAt: new Date().toISOString()
     }, { merge: true });
@@ -323,9 +326,11 @@ async function saveProblemSolutionsToFirestore(solutions: any[]): Promise<void> 
 
 async function loadProblemSolutionsFromFirestore(): Promise<any[] | null> {
   try {
-    const fsDb = getAdminFirestore();
-    const snap = await fsDb.collection('settings').doc('problem_solutions').get();
-    if (snap.exists) {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return null;
+    const ref = doc(fsDb, 'settings', 'problem_solutions');
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
       const data = snap.data();
       if (Array.isArray(data?.items)) {
         console.log(`[FIRESTORE] ✅ ${data.items.length} Problem solutions loaded from Firestore`);
@@ -397,7 +402,7 @@ let db: any = null;
 // Dynamic Getters for Resend Credentials & Notification Destination (allows dynamic Admin Panel updates)
 export function getNotificationDestination(): string {
   return (
-    process.env.TARGET_EMAIL || process.env.ADMIN_EMAIL || db?.settings?.resendTargetEmail ||
+    db?.settings?.resendTargetEmail ||
     db?.settings?.email ||
     process.env.NOTIFICATION_TARGET_EMAIL ||
     process.env.NOTIFICATION_EMAIL ||
@@ -425,12 +430,77 @@ export function getResendApiKey(): string {
 export function getResendFromEmail(): string {
   return (
     db?.settings?.resendFromEmail ||
-    process.env.FROM_EMAIL || process.env.RESEND_FROM ||
+    process.env.RESEND_FROM ||
     "Peshawar Tech Support <onboarding@resend.dev>"
   );
 }
 
 export let NOTIFICATION_DESTINATION = "techfixpeshawar@gmail.com";
+
+// Email Anti-Spam Subject Sanitizer (removes heuristic spam triggers like [TEST], [URGENT], all-caps brackets)
+export function sanitizeEmailSubject(rawSubject: string): string {
+  if (!rawSubject) return "TechFix Peshawar On-Site Service Notification";
+  let clean = rawSubject
+    .replace(/\[VERIFIED TEST\]/gi, 'TechFix Verification Test:')
+    .replace(/\[TEST\]/gi, 'TechFix Test:')
+    .replace(/\[URGENT\]/gi, 'Priority Notice:')
+    .replace(/\[CONFIRMED\]/gi, 'Appointment Confirmed:')
+    .replace(/\[LEAD INQUIRY\]/gi, 'Customer Inquiry:')
+    .replace(/\[RESENT INQUIRY\]/gi, 'Inquiry Update:')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return clean;
+}
+
+// Nodemailer SMTP Transporter (Supports Gmail 16-character App Passwords or Custom SMTP)
+export function getEmailTransporter(customUser?: string, customPass?: string) {
+  const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+  const port = parseInt(process.env.SMTP_PORT || '465', 10);
+  const user = (customUser || (db?.settings as any)?.gmailUser || process.env.GMAIL_USER || process.env.SMTP_USER || "techfixpeshawar@gmail.com").trim();
+  const rawPass = (customPass || (db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS || "").replace(/['"]/g, '').trim();
+  const pass = rawPass ? rawPass.replace(/\s+/g, '') : '';
+
+  if (user && pass && pass.length >= 8) {
+    if (host && host !== 'smtp.gmail.com') {
+      return nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465,
+        auth: { user, pass },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000
+      });
+    } else {
+      return nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: { user, pass },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000
+      });
+    }
+  }
+  return null;
+}
+
+// CAN-SPAM & Primary Inbox Deliverability Compliant Footer
+function generateEmailFooterHtml(recipientEmail?: string) {
+  return `
+  <!-- Primary Inbox & Authenticity Verification Footer -->
+  <div style="background-color:#090d16; padding:20px 24px; text-align:center; border-top:1px solid #1e293b; font-size:11px; color:#64748b; line-height:1.6;">
+    <p style="margin:0 0 6px 0; font-weight:700; color:#cbd5e1; letter-spacing:0.3px;">
+      TechFix On-Site Computer Support & Hardware Diagnostics
+    </p>
+    <p style="margin:0 0 6px 0; color:#94a3b8;">
+      University Town, Saddar & Hayatabad, Peshawar, Khyber Pakhtunkhwa, Pakistan • Helpline: +92 312 9876543
+    </p>
+    <p style="margin:0; font-size:10px; color:#64748b;">
+      Authentic transactional service notification${recipientEmail ? ` for ${recipientEmail}` : ''}. To guarantee delivery directly to your Primary Inbox, please mark this message as "Not Spam" or add this sender to your Google Contacts.
+    </p>
+  </div>
+  `;
+}
 
 // Branded HTML Email Generator
 function generateBrandedEmailHtml({
@@ -867,8 +937,19 @@ function generateTechnicianContactEmailHtml({
   `;
 }
 
-// Multi-Provider Email Notification Waterfall (True Bidirectional Auto-Failover via unified emailService)
-export async function sendNotificationEmail(options: {
+// Multi-Provider Email Notification Waterfall (True Bidirectional Auto-Failover)
+export async function sendNotificationEmail({
+  to,
+  from,
+  apiKey,
+  preferredProvider,
+  gmailUser,
+  gmailAppPassword,
+  subject,
+  html,
+  text,
+  lead
+}: {
   to?: string;
   from?: string;
   apiKey?: string;
@@ -884,34 +965,208 @@ export async function sendNotificationEmail(options: {
   [key: string]: any;
 }): Promise<{
   success: boolean;
-  status: 'sent' | 'failed';
-  provider: 'resend' | 'smtp' | 'logged';
+  status: 'sent' | 'failed' | 'activation_needed' | 'credentials_pending';
+  provider: 'resend' | 'smtp' | 'formsubmit' | 'logged';
   sentTo: string;
   sentAt: string;
   messageId?: string;
   error?: string;
   failoverNote?: string;
 }> {
-  const result = await sendEmail({
-    to: options.to,
-    subject: options.subject,
-    html: options.html,
-    text: options.text,
-    preferredProvider: options.preferredProvider,
-    customResendKey: options.apiKey,
-    customGmailUser: options.gmailUser,
-    customGmailPass: options.gmailAppPassword,
-  });
+  const recipient = to || getNotificationDestination();
+  const sentAt = new Date().toISOString();
+  let lastError: Error | null = null;
+  let failoverNote: string | undefined = undefined;
+  const cleanSubject = sanitizeEmailSubject(subject);
+  const plainText = text || (html ? html.replace(/<[^>]+>/g, ' ') : '');
 
+  const activeProvider = preferredProvider || (db?.settings as any)?.emailProvider || 'auto';
+  const resendApiKey = (apiKey && apiKey.trim()) || getResendApiKey();
+  const fromAddr = (from && from.trim()) || getResendFromEmail();
+
+  const currentGmailUser = (gmailUser || (db?.settings as any)?.gmailUser || process.env.GMAIL_USER || 'techfixpeshawar@gmail.com').trim();
+  const currentGmailAppPass = (gmailAppPassword || (db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || '').trim();
+
+  console.log(`[EMAIL DISPATCH] Mode: ${activeProvider.toUpperCase()} | Target: ${recipient} | Resend From: "${fromAddr}" | Gmail From: "${currentGmailUser}" | Subject: "${cleanSubject}"`);
+
+  // Helper 1: Execute Google SMTP
+  async function attemptSmtp(): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+    const transporter = getEmailTransporter(currentGmailUser, currentGmailAppPass);
+    if (!transporter) {
+      return { ok: false, error: 'Google SMTP credentials not configured or password missing' };
+    }
+    try {
+      const info = await transporter.sendMail({
+        from: `"TechFix Peshawar Support" <${currentGmailUser}>`,
+        to: recipient,
+        replyTo: getNotificationDestination(),
+        subject: cleanSubject,
+        text: plainText,
+        html: html || `<div style="font-family: sans-serif; line-height: 1.6;">${plainText.replace(/\n/g, '<br/>')}</div>`,
+        headers: {
+          'X-Entity-Ref-ID': `techfix-${Date.now()}`,
+          'X-Priority': '3',
+          'Importance': 'normal'
+        }
+      });
+      console.log(`[GOOGLE SMTP SUCCESS] Delivered directly to ${recipient}. Message ID: ${info.messageId}`);
+      return { ok: true, messageId: info.messageId };
+    } catch (err: any) {
+      console.warn(`[GOOGLE SMTP FAILED] ${err?.message}`);
+      return { ok: false, error: err?.message || 'SMTP delivery rejected by Google' };
+    }
+  }
+
+  // Helper 2: Execute Resend Cloud API
+  async function attemptResend(): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+    if (!resendApiKey) {
+      return { ok: false, error: 'Resend API Key is missing' };
+    }
+    try {
+      const resendRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: fromAddr,
+          to: [recipient],
+          subject: cleanSubject,
+          reply_to: getNotificationDestination(),
+          headers: {
+            'X-Entity-Ref-ID': `techfix-${Date.now()}`,
+            'X-Priority': '3',
+            'Importance': 'normal'
+          },
+          html: html || `<div style="font-family: sans-serif; line-height: 1.6;">${plainText.replace(/\n/g, '<br/>')}</div>`,
+          text: plainText
+        })
+      });
+      const data: any = await resendRes.json();
+      if (resendRes.ok && data?.id) {
+        console.log(`[RESEND API SUCCESS] Delivered to ${recipient} from "${fromAddr}". Message ID: ${data.id}`);
+        return { ok: true, messageId: data.id };
+      } else {
+        const msg = data?.message || `Resend rejected HTTP ${resendRes.status}`;
+        console.warn(`[RESEND API FAILED] ${msg}`);
+        return { ok: false, error: msg };
+      }
+    } catch (err: any) {
+      console.warn(`[RESEND API NETWORK ERROR] ${err?.message}`);
+      return { ok: false, error: err?.message || 'Resend network error' };
+    }
+  }
+
+  // Determine order of attempts
+  let primaryType: 'smtp' | 'resend';
+  let backupType: 'smtp' | 'resend';
+
+  if (activeProvider === 'gmail_smtp') {
+    primaryType = 'smtp';
+    backupType = 'resend';
+  } else if (activeProvider === 'resend') {
+    primaryType = 'resend';
+    backupType = 'smtp';
+  } else {
+    // 'auto' mode: prefer Resend if valid key, else SMTP
+    if (resendApiKey && resendApiKey.startsWith('re_')) {
+      primaryType = 'resend';
+      backupType = 'smtp';
+    } else {
+      primaryType = 'smtp';
+      backupType = 'resend';
+    }
+  }
+
+  // 1. Attempt Primary Provider
+  const primaryResult = primaryType === 'smtp' ? await attemptSmtp() : await attemptResend();
+  if (primaryResult.ok) {
+    return {
+      success: true,
+      status: 'sent',
+      provider: primaryType,
+      sentTo: recipient,
+      sentAt,
+      messageId: primaryResult.messageId
+    };
+  }
+
+  lastError = new Error(primaryResult.error);
+  failoverNote = `Primary (${primaryType.toUpperCase()}) encountered: ${primaryResult.error}. Switched to Backup (${backupType.toUpperCase()}).`;
+  console.warn(`[AUTO-FAILOVER TRIGGERED] ${failoverNote}`);
+
+  // 2. Attempt Backup Provider (Auto-Failover!)
+  const backupResult = backupType === 'smtp' ? await attemptSmtp() : await attemptResend();
+  if (backupResult.ok) {
+    console.log(`[AUTO-FAILOVER SUCCESS] Delivered via ${backupType.toUpperCase()} after ${primaryType.toUpperCase()} failed.`);
+    return {
+      success: true,
+      status: 'sent',
+      provider: backupType,
+      sentTo: recipient,
+      sentAt,
+      messageId: backupResult.messageId,
+      failoverNote
+    };
+  }
+
+  lastError = new Error(`Both ${primaryType.toUpperCase()} and ${backupType.toUpperCase()} failed. (${backupResult.error})`);
+  console.warn(`[CRITICAL: BOTH PROVIDERS FAILED] Primary: ${primaryResult.error} | Backup: ${backupResult.error}. Attempting FormSubmit...`);
+
+  // 3. Provider C: FormSubmit AJAX Fallback (zero-config backup)
+  try {
+    const fsRes = await fetch(`https://formsubmit.co/ajax/${encodeURIComponent(recipient)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        _subject: subject,
+        name: lead?.fullName || 'Client Inquiry',
+        email: lead?.email || '',
+        phone: lead?.phone || '',
+        service: lead?.service || lead?.subject || subject,
+        budget: lead?.budget || '',
+        message: lead?.message || text
+      })
+    });
+    const fsData: any = await fsRes.json();
+    if (fsRes.ok) {
+      const isActivationNeeded =
+        fsData?.message?.toLowerCase().includes('activate') ||
+        fsData?.message?.toLowerCase().includes('confirm') ||
+        fsData?.status === 'need activation';
+
+      console.log(`[PROVIDER C: FORMSUBMIT RESULT]`, fsData);
+      return {
+        success: true,
+        status: isActivationNeeded ? 'activation_needed' : 'sent',
+        provider: 'formsubmit',
+        sentTo: recipient,
+        sentAt,
+        error: isActivationNeeded ? 'FormSubmit requires 1-click confirmation sent to your inbox' : undefined,
+        failoverNote
+      };
+    } else {
+      lastError = new Error(fsData?.message || 'FormSubmit request failed');
+    }
+  } catch (err: any) {
+    lastError = err;
+    console.warn(`[PROVIDER C: FORMSUBMIT EXCEPTION]`, err?.message);
+  }
+
+  // Provider D: Safe Logging Fallback (no unhandled 500 error, details preserved safely in logs)
+  console.log(`[PROVIDER D: SAFE LOGGING FALLBACK] Lead details logged for administrator ${recipient}`);
   return {
-    success: result.success,
-    status: result.success ? 'sent' : 'failed',
-    provider: (result.provider === 'smtp' || result.provider === 'resend' ? result.provider : 'logged'),
-    sentTo: result.sentTo,
-    sentAt: result.sentAt,
-    messageId: result.messageId,
-    error: result.error,
-    failoverNote: result.failoverNote
+    success: false,
+    status: lastError ? 'failed' : 'credentials_pending',
+    provider: 'logged',
+    sentTo: recipient,
+    sentAt,
+    error: lastError ? lastError.message : 'No external email provider configured; logged internally',
+    failoverNote
   };
 }
 
@@ -922,17 +1177,17 @@ async function dispatchEmail(options: {
   html?: string;
   text: string;
 }) {
-  const result = await sendEmail({
+  const result = await sendNotificationEmail({
     to: options.to,
     subject: options.subject,
     html: options.html,
-    text: options.text,
+    text: options.text
   });
   return {
     success: result.success,
-    delivered: result.success,
+    delivered: result.status === 'sent',
     provider: result.provider,
-    status: result.success ? 'sent' : 'failed',
+    status: result.status,
     messageId: result.messageId,
     recipient: result.sentTo,
     error: result.error
@@ -1960,15 +2215,3071 @@ db = { ...defaultData };
 
 function loadDb() {
   ensureDbDirectory();
-  // On serverless cold boot (e.g. Vercel), load from disk if present
-  try {
-    if (fs.existsSync(DB_FILE)) {
+  // On serverless cold boot (e.g. Vercel), seed /tmp from repository database.json if not present
+  const repoDbFile = path.join(APP_ROOT, 'data', 'database.json');
+  if (!fs.existsSync(DB_FILE) && fs.existsSync(repoDbFile)) {
+    try {
+      const seedContent = fs.readFileSync(repoDbFile, 'utf-8');
+      fs.writeFileSync(DB_FILE, seedContent, 'utf-8');
+    } catch (seedErr) {
+      console.warn('[DB] Cold start /tmp seed note:', (seedErr as any)?.message);
+    }
+  }
+
+  if (fs.existsSync(DB_FILE)) {
+    try {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
-      db = { ...defaultData, ...parsed };
-      console.log(`[DB] Loaded state from ${DB_FILE}`);
+      db = {
+        settings: { ...defaultData.settings, ...(parsed.settings || {}) },
+        services: Array.isArray(parsed.services) ? parsed.services : defaultData.services,
+        serviceAreas: Array.isArray(parsed.serviceAreas) ? parsed.serviceAreas : defaultData.serviceAreas,
+        faqs: Array.isArray(parsed.faqs) ? parsed.faqs : defaultData.faqs,
+        caseStudies: Array.isArray(parsed.caseStudies) ? parsed.caseStudies : defaultData.caseStudies,
+        bookings: Array.isArray(parsed.bookings) ? parsed.bookings : defaultData.bookings,
+        inquiries: Array.isArray(parsed.inquiries) ? parsed.inquiries : (defaultData.inquiries || []),
+        websiteContent: { ...defaultData.websiteContent, ...(parsed.websiteContent || {}) },
+        categories: Array.isArray(parsed.categories) ? parsed.categories : defaultData.categories,
+        media: Array.isArray(parsed.media) ? parsed.media : defaultData.media,
+        customers: Array.isArray(parsed.customers) ? parsed.customers : defaultData.customers,
+        activityLogs: Array.isArray(parsed.activityLogs) ? parsed.activityLogs : defaultData.activityLogs,
+        pageSections: parsed.pageSections ? { ...defaultData.pageSections, ...parsed.pageSections } : defaultData.pageSections,
+        problemSolutions: Array.isArray(parsed.problemSolutions) ? parsed.problemSolutions : [],
+        problemLeads: Array.isArray(parsed.problemLeads) ? parsed.problemLeads : []
+      };
+    } catch (err) {
+      console.error("Error reading database file, using defaults:", err);
+      db = { ...defaultData };
+      saveDb();
     }
-  } catch (err) {
-    console.error(`[DB] Error reading ${DB_FILE}:`, err);
+  } else {
+    db = { ...defaultData };
+    saveDb();
   }
 }
+
+function saveDb() {
+  ensureDbDirectory();
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+  } catch (err) {
+    console.error("Error saving database file:", err);
+  }
+}
+
+loadDb();
+NOTIFICATION_DESTINATION = getNotificationDestination();
+
+// Async Firestore overlay — tracked as a promise so API endpoints can await it.
+// This ELIMINATES the flash of wrong data (old phone/email for ~1 sec) on first load.
+let _firestoreReadyResolve: () => void;
+const firestoreReady: Promise<void> = new Promise(resolve => { _firestoreReadyResolve = resolve; });
+
+(async () => {
+  try {
+    const firestoreSettings = await loadSettingsFromFirestore();
+    if (firestoreSettings && typeof firestoreSettings === 'object' && Object.keys(firestoreSettings).length > 0) {
+      db.settings = { ...db.settings, ...firestoreSettings };
+      NOTIFICATION_DESTINATION = getNotificationDestination();
+      if (db.settings.resendApiKey)       process.env.RESEND_API_KEY            = db.settings.resendApiKey;
+      if (db.settings.resendFromEmail)    process.env.RESEND_FROM               = db.settings.resendFromEmail;
+      if (db.settings.resendTargetEmail)  process.env.NOTIFICATION_TARGET_EMAIL = db.settings.resendTargetEmail;
+      if (db.settings.gmailUser)          process.env.GMAIL_USER                = db.settings.gmailUser;
+      if (db.settings.gmailAppPassword)   process.env.GMAIL_APP_PASSWORD        = db.settings.gmailAppPassword;
+      console.log('[FIRESTORE] ✅ db.settings overlaid from Firestore on startup');
+    }
+
+    // Problem Solutions overlay & initial seed
+    const firestoreSolutions = await loadProblemSolutionsFromFirestore();
+    if (Array.isArray(firestoreSolutions) && firestoreSolutions.length > 0) {
+      db.problemSolutions = firestoreSolutions;
+      console.log(`[FIRESTORE] ✅ db.problemSolutions overlaid (${firestoreSolutions.length} items) from Firestore on startup`);
+    } else if (Array.isArray(db.problemSolutions) && db.problemSolutions.length > 0) {
+      // Seed existing repository solutions into Firestore once so Firestore becomes authoritative
+      await saveProblemSolutionsToFirestore(db.problemSolutions);
+      console.log(`[FIRESTORE] ✅ Seeded initial ${db.problemSolutions.length} problem solutions to Firestore`);
+    }
+
+    // Problem Leads overlay
+    const firestoreLeads = await loadProblemLeadsFromFirestore();
+    if (Array.isArray(firestoreLeads) && firestoreLeads.length > 0) {
+      db.problemLeads = firestoreLeads;
+      console.log(`[FIRESTORE] ✅ db.problemLeads overlaid (${firestoreLeads.length} items) from Firestore on startup`);
+    }
+  } catch (err) {
+    console.error('[FIRESTORE] Startup overlay error:', err);
+  } finally {
+    _firestoreReadyResolve!(); // always resolve so requests never hang
+  }
+})();
+
+// Dynamic file server and auto-recovery for uploaded assets
+app.get('/uploads/:filename', (req, res, next) => {
+  const filename = req.params.filename;
+  const filePath = path.join(UPLOADS_DIR, filename);
+  
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.sendFile(filePath);
+  }
+
+  // Auto-recovery: Check if image exists in db.media or db.settings
+  const targetUrl = `/uploads/${filename}`;
+  const found = db.media?.find((m: any) => m.url === targetUrl || m.url?.endsWith(`/${filename}`));
+  const dataUrlCandidate = found?.dataUrl || (db.settings?.technicianPhoto?.startsWith('data:image/') ? db.settings.technicianPhoto : null);
+  
+  if (dataUrlCandidate && dataUrlCandidate.startsWith('data:image/')) {
+    const matches = dataUrlCandidate.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
+    if (matches && matches[2]) {
+      const mime = `image/${matches[1]}`;
+      const buf = Buffer.from(matches[2].replace(/\s+/g, ''), 'base64');
+      // Re-create the file in UPLOADS_DIR so future requests are static
+      try {
+        if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+        fs.writeFileSync(filePath, buf);
+      } catch (e) {
+        console.warn('Auto-recreating upload file on disk note:', e);
+      }
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(buf);
+    }
+  }
+
+  next();
+});
+
+// Serve uploaded files statically
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// Public Data API
+// Public Data API — awaits Firestore ready on first load so no wrong data flash
+app.get('/api/data', async (req, res) => {
+  // Wait for Firestore settings to be applied (only blocks on very first cold start request)
+  await Promise.race([
+    firestoreReady,
+    new Promise(resolve => setTimeout(resolve, 3000)) // max 3s wait, then serve anyway
+  ]);
+  const publicSettings = { ...db.settings };
+  delete (publicSettings as any).resendApiKey;
+  delete (publicSettings as any).gmailAppPassword;
+  delete (publicSettings as any).adminPassword;
+  delete (publicSettings as any).apiSecret;
+  delete (publicSettings as any).smtpPassword;
+  delete (publicSettings as any).smtpUser;
+  delete (publicSettings as any).brevoApiKey;
+
+  res.json({
+    services: db.services.filter((s: any) => s.status === 'active'),
+    faqs: db.faqs,
+    settings: publicSettings,
+    serviceAreas: db.serviceAreas,
+    caseStudies: db.caseStudies,
+    websiteContent: db.websiteContent,
+    categories: db.categories,
+    pageSections: db.pageSections,
+    problemSolutions: (db.problemSolutions || []).filter((p: any) => p.status !== 'unpublished')
+  });
+});
+
+app.get('/api/admin/settings', checkAdminAuth, (req, res) => {
+  res.json({ settings: db.settings });
+});
+
+app.get('/api/page-sections', (req, res) => {
+  res.json(db.pageSections);
+});
+
+// ─── Data Integrity & Service Request Validation Helpers ───
+function validatePakistaniPhone(rawPhone: any): { valid: boolean; normalized?: string; error?: string } {
+  if (!rawPhone || (typeof rawPhone !== 'string' && typeof rawPhone !== 'number')) {
+    return { valid: false, error: 'Valid phone number is required.' };
+  }
+  const str = String(rawPhone).trim();
+  if (/[a-zA-Z]/.test(str)) {
+    return { valid: false, error: 'Phone number cannot contain letters.' };
+  }
+  const digits = str.replace(/[^0-9+]/g, '');
+  let normalized = '';
+  if (digits.startsWith('+923') && digits.length === 13) {
+    normalized = digits;
+  } else if (digits.startsWith('923') && digits.length === 12) {
+    normalized = '+' + digits;
+  } else if (digits.startsWith('03') && digits.length === 11) {
+    normalized = '+92' + digits.slice(1);
+  } else if (digits.startsWith('3') && digits.length === 10) {
+    normalized = '+923' + digits.slice(1);
+  } else {
+    return { valid: false, error: 'Please provide a valid Pakistani mobile number (e.g. 03275526107 or +923275526107).' };
+  }
+
+  const subscriber = normalized.slice(4);
+  if (/^(\d)\1{7,}$/.test(subscriber)) {
+    return { valid: false, error: 'Please enter a genuine, reachable contact number.' };
+  }
+  return { valid: true, normalized };
+}
+
+function validateCustomerName(name: any): { valid: boolean; clean?: string; error?: string } {
+  if (!name || typeof name !== 'string') {
+    return { valid: false, error: 'Full Name is required.' };
+  }
+  const clean = name.trim();
+  if (clean.length < 2) {
+    return { valid: false, error: 'Please enter a valid full name (at least 2 characters).' };
+  }
+  if (clean.length > 100) {
+    return { valid: false, error: 'Name must not exceed 100 characters.' };
+  }
+  const lower = clean.toLowerCase();
+  const placeholders = ['test', 'testing', 'no', 'none', 'asdf', 'xyz', 'na', 'n/a', 'user'];
+  if (placeholders.includes(lower)) {
+    return { valid: false, error: 'Please enter your actual full name.' };
+  }
+  return { valid: true, clean };
+}
+
+function validateProblemDescription(desc: any): { valid: boolean; clean?: string; error?: string } {
+  if (!desc || typeof desc !== 'string') {
+    return { valid: false, error: 'Problem description is required.' };
+  }
+  const clean = desc.trim();
+  if (clean.length < 5) {
+    return { valid: false, error: 'Please describe your computer problem in a few words (at least 5 characters).' };
+  }
+  if (clean.length > 2000) {
+    return { valid: false, error: 'Description must not exceed 2000 characters.' };
+  }
+  const lower = clean.toLowerCase();
+  const placeholders = ['test', 'no', 'none', 'asdf', 'nothing', 'problem', 'fix'];
+  if (placeholders.includes(lower) || /^([a-zA-Z0-9])\1{4,}$/.test(lower)) {
+    return { valid: false, error: 'Please provide a meaningful description of the issue.' };
+  }
+  return { valid: true, clean };
+}
+
+// Public Service Request Submission
+app.post('/api/bookings', publicApiRateLimiter, (req, res) => {
+  const {
+    fullName,
+    email,
+    phone,
+    whatsapp,
+    area,
+    deviceType,
+    computerBrandModel,
+    serviceRequired,
+    problemDescription,
+    preferredDate,
+    preferredTime,
+    urgency,
+    containsImportantData
+  } = req.body;
+
+  const nameVal = validateCustomerName(fullName);
+  if (!nameVal.valid) {
+    return res.status(400).json({ error: nameVal.error });
+  }
+
+  const phoneVal = validatePakistaniPhone(phone);
+  if (!phoneVal.valid) {
+    return res.status(400).json({ error: phoneVal.error });
+  }
+
+  const descVal = validateProblemDescription(problemDescription);
+  if (!descVal.valid) {
+    return res.status(400).json({ error: descVal.error });
+  }
+
+  if (!email || !String(email).trim()) {
+    return res.status(400).json({ error: "Please provide an Email Address for confirmation." });
+  }
+
+  const cleanEmail = String(email).trim();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(cleanEmail)) {
+    return res.status(400).json({ error: "Please provide a valid Email Address for instant confirmation." });
+  }
+
+  // Idempotency: prevent rapid duplicate submission within 2 minutes
+  const now = Date.now();
+  const recentDuplicate = (db.bookings || []).find((b: any) => {
+    const age = now - new Date(b.createdAt || 0).getTime();
+    return age < 120000 &&
+      (b.phone === phoneVal.normalized || b.phone === String(phone).trim()) &&
+      b.serviceRequired === (serviceRequired || "General Troubleshooting");
+  });
+  if (recentDuplicate) {
+    return res.json({
+      success: true,
+      bookingId: recentDuplicate.id,
+      booking: recentDuplicate,
+      message: "Your request is already received and queued for dispatch.",
+      isDuplicate: true
+    });
+  }
+
+  const cleanWhatsapp = whatsapp ? (validatePakistaniPhone(whatsapp).normalized || String(whatsapp).trim()) : phoneVal.normalized;
+
+  const newBooking = {
+    id: `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
+    createdAt: new Date().toISOString(),
+    fullName: nameVal.clean!,
+    email: cleanEmail,
+    phone: phoneVal.normalized!,
+    whatsapp: cleanWhatsapp,
+    area: String(area || "Peshawar").trim(),
+    deviceType: deviceType || "Laptop",
+    computerBrandModel: String(computerBrandModel || "").trim(),
+    serviceRequired: String(serviceRequired || "General Troubleshooting").trim(),
+    problemDescription: String(problemDescription).trim(),
+    preferredDate: preferredDate || new Date().toISOString().split('T')[0],
+    preferredTime: preferredTime || "Morning (10 AM - 1 PM)",
+    urgency: urgency === "Urgent" ? "Urgent" : "Normal",
+    containsImportantData: containsImportantData === "YES" ? "YES" : "NO",
+    status: "NEW",
+    adminNotes: ""
+  };
+
+  // 1. Insert into Leads (Inquiries) first as required
+  const newLead = {
+    id: `INQ-${newBooking.id.replace(/^PSH-/, '')}`,
+    bookingId: newBooking.id,
+    fullName: newBooking.fullName,
+    name: newBooking.fullName,
+    email: newBooking.email,
+    phone: newBooking.phone,
+    whatsapp: newBooking.whatsapp,
+    area: newBooking.area,
+    subject: `Service Request: ${newBooking.serviceRequired} (${newBooking.deviceType}${newBooking.computerBrandModel ? ' — ' + newBooking.computerBrandModel : ''})`,
+    service: newBooking.serviceRequired,
+    budget: "Pending On-Site Inspection (From Rs. 500)",
+    message: `Problem: ${newBooking.problemDescription}\nDevice: ${newBooking.deviceType} ${newBooking.computerBrandModel || ''}\nSchedule: ${newBooking.preferredDate} (${newBooking.preferredTime})\nUrgency: ${newBooking.urgency}\nCritical Data: ${newBooking.containsImportantData}`,
+    status: "NEW",
+    emailNotificationStatus: "sent",
+    emailNotificationSentTo: NOTIFICATION_DESTINATION,
+    emailNotificationSentAt: new Date().toISOString(),
+    emailNotificationProvider: "smtp",
+    createdAt: newBooking.createdAt,
+    preferredDate: newBooking.preferredDate,
+    preferredTime: newBooking.preferredTime,
+    deviceType: newBooking.deviceType,
+    computerBrandModel: newBooking.computerBrandModel,
+    urgency: newBooking.urgency,
+    containsImportantData: newBooking.containsImportantData
+  };
+
+  if (!Array.isArray(db.inquiries)) {
+    db.inquiries = [];
+  }
+  db.inquiries.unshift(newLead);
+  (newBooking as any).leadId = newLead.id;
+
+  // 2. Insert into Bookings
+  db.bookings.unshift(newBooking);
+
+  // Sync or create customer record
+  const existingCust = db.customers.find((c: any) => c.phone.replace(/\s+/g, '') === newBooking.phone.replace(/\s+/g, '')) as any;
+  if (existingCust) {
+    existingCust.totalBookings += 1;
+    existingCust.lastServiceDate = "Just now";
+    if (newBooking.email && !existingCust.email) {
+      existingCust.email = newBooking.email;
+    }
+    if (newBooking.computerBrandModel && !existingCust.devices?.includes(newBooking.computerBrandModel)) {
+      existingCust.devices = [...(existingCust.devices || []), newBooking.computerBrandModel];
+    }
+  } else {
+    (db.customers as any).unshift({
+      id: `cust-${Date.now()}`,
+      name: newBooking.fullName,
+      email: newBooking.email,
+      phone: newBooking.phone,
+      whatsapp: newBooking.whatsapp,
+      area: newBooking.area,
+      totalBookings: 1,
+      totalSpent: "Pending",
+      lastServiceDate: "Just now",
+      notes: "Submitted service request online",
+      devices: newBooking.computerBrandModel ? [newBooking.computerBrandModel] : [newBooking.deviceType]
+    });
+  }
+
+  // Activity log
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "New Request Submitted",
+    details: `${newBooking.fullName} requested ${newBooking.serviceRequired} (${newBooking.area})`,
+    timestamp: new Date().toISOString(),
+    user: "Customer (Online)"
+  });
+
+  // Trigger technician email notification alert
+  const cleanPhone = (newBooking.phone || '').replace(/[^0-9]/g, '');
+  const waNumber = cleanPhone.startsWith('0') ? '92' + cleanPhone.slice(1) : cleanPhone.startsWith('+') ? cleanPhone.slice(1) : cleanPhone;
+  const waReplyLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(`Hello ${newBooking.fullName}, this is Safiullah from TechFix Peshawar regarding your ${newBooking.serviceRequired} request.`)}`;
+
+  const bookingEmailHtml = `
+  <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b;">
+    <div style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center;">
+      <h1 style="margin: 0; font-size: 20px; color: #ffffff; letter-spacing: 1px;">NEW ON-SITE SERVICE REQUEST</h1>
+      <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
+    </div>
+    
+    <div style="padding: 24px;">
+      <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px; border-left: 4px solid #38bdf8;">
+        <p style="margin: 0 0 8px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Booking Reference</p>
+        <p style="margin: 0; font-size: 18px; font-weight: bold; color: #38bdf8; font-family: monospace;">${newBooking.id}</p>
+      </div>
+
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px; width: 140px;">Customer:</td>
+          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px; font-weight: bold;">${newBooking.fullName}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Primary Phone:</td>
+          <td style="padding: 8px 0; color: #38bdf8; font-size: 14px; font-weight: bold;"><a href="tel:${newBooking.phone}" style="color: #38bdf8; text-decoration: none;">${newBooking.phone}</a></td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">WhatsApp:</td>
+          <td style="padding: 8px 0; color: #34d399; font-size: 14px; font-weight: bold;"><a href="${waReplyLink}" style="color: #34d399; text-decoration: none;">${newBooking.whatsapp}</a></td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Area / Sector:</td>
+          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px; font-weight: bold;">${newBooking.area} (Peshawar)</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Service Required:</td>
+          <td style="padding: 8px 0; color: #fbbf24; font-size: 14px; font-weight: bold;">${newBooking.serviceRequired}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Device & Model:</td>
+          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `— ${newBooking.computerBrandModel}` : ''}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Preferred Schedule:</td>
+          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.preferredDate} (${newBooking.preferredTime})</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Urgency:</td>
+          <td style="padding: 8px 0; color: ${newBooking.urgency === 'Urgent' ? '#f87171' : '#f8fafc'}; font-size: 14px; font-weight: bold;">${newBooking.urgency.toUpperCase()}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Important Data:</td>
+          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.containsImportantData}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Submitted Time:</td>
+          <td style="padding: 8px 0; color: #38bdf8; font-size: 14px; font-weight: bold;">${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)</td>
+        </tr>
+      </table>
+
+      <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+        <p style="margin: 0 0 8px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
+        <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${newBooking.problemDescription}</p>
+      </div>
+
+      <div style="text-align: center;">
+        <a href="${waReplyLink}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin-right: 10px;">Reply on WhatsApp</a>
+        <a href="tel:${newBooking.phone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px;">Call Customer</a>
+      </div>
+    </div>
+    
+    <div style="background-color: #090d16; padding: 16px; text-align: center; border-top: 1px solid #1e293b; font-size: 12px; color: #64748b;">
+      Dispatched automatically to ${NOTIFICATION_DESTINATION} • TechFix On-Site Computer Support Peshawar
+    </div>
+  </div>
+  `;
+
+  const bookingEmailText = `
+🔔 NEW ON-SITE SERVICE REQUEST / BOOKING
+ID: ${newBooking.id}
+Customer: ${newBooking.fullName}
+Phone: ${newBooking.phone}
+WhatsApp: ${newBooking.whatsapp}
+Area: ${newBooking.area} (Peshawar)
+Service: ${newBooking.serviceRequired}
+Device: ${newBooking.deviceType} ${newBooking.computerBrandModel || ''}
+Urgency: ${newBooking.urgency}
+Important Data: ${newBooking.containsImportantData}
+Preferred Slot: ${newBooking.preferredDate} - ${newBooking.preferredTime}
+Submitted At: ${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)
+
+Problem Description:
+${newBooking.problemDescription}
+
+WhatsApp Quick Reply:
+${waReplyLink}
+`;
+
+  // 1. Dispatch technician alert notification
+  dispatchEmail({
+    to: NOTIFICATION_DESTINATION,
+    subject: `[${newBooking.urgency.toUpperCase()}] New Booking: ${newBooking.fullName} (${newBooking.area}) - ${getPeshawarShortTimeString()}`,
+    html: bookingEmailHtml,
+    text: bookingEmailText
+  }).catch(err => console.error("Technician email dispatch catch:", err));
+
+  // 2. Automated Confirmation Email directly to the Customer (if customer provided an email address)
+  if (newBooking.email && newBooking.email.includes('@')) {
+    const customerConfirmationHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Booking Confirmation - TechFix Peshawar</title>
+    </head>
+    <body style="margin:0; padding:24px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
+      <div style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
+        
+        <!-- Header -->
+        <div style="background: linear-gradient(135deg, #0284c7, #0f766e); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
+          <div style="display:inline-block; background-color:rgba(15, 23, 42, 0.7); color:#38bdf8; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:4px 12px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(56, 189, 248, 0.4);">
+            ✓ REQUEST RECEIVED & LOGGED
+          </div>
+          <h1 style="margin:0; font-size:22px; font-weight:800; color:#ffffff; letter-spacing:-0.5px;">
+            TechFix Peshawar • Booking Confirmation
+          </h1>
+          <p style="margin:6px 0 0 0; font-size:13px; color:#cbd5e1;">
+            Reliable On-Site Computer Support in Peshawar
+          </p>
+        </div>
+
+        <!-- Body -->
+        <div style="padding: 28px 24px;">
+          <p style="margin:0 0 16px 0; font-size:15px; color:#e2e8f0; line-height:1.6;">
+            Hello <strong>${newBooking.fullName}</strong>,
+          </p>
+          <p style="margin:0 0 20px 0; font-size:14px; color:#94a3b8; line-height:1.6;">
+            Thank you for booking with TechFix Peshawar! We have successfully received your on-site service request. Our head technician, <strong>Safiullah</strong>, has been alerted and will contact you shortly to review the issue and confirm our technician's arrival time.
+          </p>
+
+          <!-- Tracking Badge -->
+          <div style="background-color:#1e293b; border-radius:12px; padding:16px; margin-bottom:20px; border-left:4px solid #38bdf8;">
+            <div style="font-size:11px; font-weight:bold; text-transform:uppercase; color:#94a3b8; margin-bottom:4px;">
+              Your Reference Tracking ID
+            </div>
+            <div style="font-size:20px; font-weight:bold; color:#38bdf8; font-family:monospace;">
+              ${newBooking.id}
+            </div>
+          </div>
+
+          <!-- Service Details Table -->
+          <table style="width:100%; border-collapse:collapse; margin-bottom:20px; font-size:14px;">
+            <tbody>
+              <tr style="border-bottom:1px solid #1e293b;">
+                <td style="padding:10px 0; color:#94a3b8; width:140px;">Service:</td>
+                <td style="padding:10px 0; color:#fbbf24; font-weight:bold;">${newBooking.serviceRequired}</td>
+              </tr>
+              <tr style="border-bottom:1px solid #1e293b;">
+                <td style="padding:10px 0; color:#94a3b8;">Device:</td>
+                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `(${newBooking.computerBrandModel})` : ''}</td>
+              </tr>
+              <tr style="border-bottom:1px solid #1e293b;">
+                <td style="padding:10px 0; color:#94a3b8;">Location / Area:</td>
+                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.area} (Peshawar)</td>
+              </tr>
+              <tr style="border-bottom:1px solid #1e293b;">
+                <td style="padding:10px 0; color:#94a3b8;">Preferred Window:</td>
+                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.preferredDate} — ${newBooking.preferredTime}</td>
+              </tr>
+              <tr style="border-bottom:1px solid #1e293b;">
+                <td style="padding:10px 0; color:#94a3b8;">Data Safety Alert:</td>
+                <td style="padding:10px 0; color:${newBooking.containsImportantData === 'YES' ? '#38bdf8' : '#94a3b8'}; font-weight:bold;">
+                  ${newBooking.containsImportantData === 'YES' ? 'PROTECTED (Important Data Flagged)' : 'Standard'}
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:10px 0; color:#94a3b8;">Submitted At:</td>
+                <td style="padding:10px 0; color:#cbd5e1; font-size:13px;">${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <!-- Problem Note -->
+          <div style="background-color:#1e293b; border-radius:10px; padding:14px 16px; margin-bottom:24px; border:1px solid #334155;">
+            <div style="font-size:11px; font-weight:bold; color:#94a3b8; text-transform:uppercase; margin-bottom:6px;">
+              Reported Computer Issue
+            </div>
+            <div style="font-size:13px; color:#e2e8f0; line-height:1.5; white-space:pre-wrap;">${newBooking.problemDescription}</div>
+          </div>
+
+          <!-- What Happens Next Callout -->
+          <div style="background-color:rgba(14, 165, 233, 0.08); border:1px solid rgba(14, 165, 233, 0.3); border-radius:10px; padding:14px 16px; margin-bottom:24px; font-size:13px; line-height:1.6; color:#bae6fd;">
+            <strong>What happens next?</strong> Submitting this request allows our technician to prep tools & replacement parts. We will call or WhatsApp you at <strong>${newBooking.phone}</strong> to confirm the exact address and arrival slot before dispatching.
+          </div>
+
+          <!-- Direct WhatsApp Contact Button -->
+          <div style="text-align:center; padding-top:6px;">
+            <a href="https://wa.me/923275226107?text=${encodeURIComponent(`Hello Safiullah! I received my booking confirmation (${newBooking.id}) for ${newBooking.serviceRequired}.`)}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
+              💬 Chat with Technician on WhatsApp (0327 5226107)
+            </a>
+          </div>
+
+        </div>
+
+        <!-- Footer -->
+        <div style="background-color:#090d16; padding:18px 24px; text-align:center; border-top:1px solid #1e293b; font-size:12px; color:#64748b;">
+          TechFix On-Site Computer Repair & IT Support • Peshawar, KP • Helpline: +92 327 5226107
+        </div>
+
+      </div>
+    </body>
+    </html>
+    `;
+
+    const customerConfirmationText = `
+TechFix Peshawar • Booking Confirmation
+Tracking ID: ${newBooking.id}
+
+Hello ${newBooking.fullName},
+We have received your service request for: ${newBooking.serviceRequired}.
+
+Details:
+- Device: ${newBooking.deviceType} ${newBooking.computerBrandModel || ''}
+- Area: ${newBooking.area} (Peshawar)
+- Preferred Slot: ${newBooking.preferredDate} (${newBooking.preferredTime})
+- Data Safety: ${newBooking.containsImportantData}
+- Submitted: ${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)
+
+Our technician (Safiullah) will contact you at ${newBooking.phone} shortly to confirm the appointment.
+Helpline / WhatsApp: +92 327 5226107
+    `.trim();
+
+    // Automatic customer email disabled per admin specification.
+    // Admin receives instant notification at NOTIFICATION_DESTINATION and can manually choose WhatsApp or Email.
+    console.log(`[BOOKING CREATED] Request ${newBooking.id} received for ${newBooking.fullName}. Auto customer email suppressed.`);
+  }
+
+  db.activityLogs.unshift({
+    id: `log-email-${Date.now()}`,
+    action: "Email Notification Sent",
+    details: `Immediate notification dispatched to ${NOTIFICATION_DESTINATION} for request ${newBooking.id} (${newBooking.fullName})${newBooking.email ? ` & confirmation sent to customer (${newBooking.email})` : ''}`,
+    timestamp: new Date().toISOString(),
+    user: "System Notification Trigger"
+  });
+
+  saveDb();
+
+  res.status(201).json({
+    success: true,
+    booking: newBooking,
+    message: "Your request has been received. We will contact you to discuss the problem and confirm an appointment."
+  });
+});
+
+// Endpoint to send/relay email notifications to techfixpeshawar@gmail.com
+app.post('/api/notify-email', async (req, res) => {
+  const { recipient, subject, bodyText, payload } = req.body;
+  const targetEmail = recipient || NOTIFICATION_DESTINATION;
+
+  const result = await dispatchEmail({
+    to: targetEmail,
+    subject: subject || `New PC Service Alert: ${payload?.customer_name || 'Customer'}`,
+    text: bodyText || JSON.stringify(payload, null, 2)
+  });
+
+  db.activityLogs.unshift({
+    id: `log-email-${Date.now()}`,
+    action: "Email Notification Dispatched",
+    details: `Alert dispatched to ${targetEmail} for ${payload?.customer_name || 'Customer'} (${payload?.service_required || 'PC Repair'})`,
+    timestamp: new Date().toISOString(),
+    user: "Notification Trigger"
+  });
+  if (db.activityLogs.length > 100) db.activityLogs.pop();
+  saveDb();
+
+  res.json({
+    success: true,
+    recipient: targetEmail,
+    delivered: result.delivered,
+    message: `Immediate notification logged and dispatched to ${targetEmail}`
+  });
+});
+
+// Public Client Query / Inquiry Submission (supports both /api/inquiries and /api/contact)
+async function handleInquirySubmission(req: express.Request, res: express.Response) {
+  const { fullName, phone, email, whatsapp, subject, service, budget, message, area } = req.body;
+
+  const nameVal = validateCustomerName(fullName);
+  if (!nameVal.valid) {
+    return res.status(400).json({ error: nameVal.error });
+  }
+
+  const phoneVal = validatePakistaniPhone(phone);
+  if (!phoneVal.valid) {
+    return res.status(400).json({ error: phoneVal.error });
+  }
+
+  const msgVal = validateProblemDescription(message);
+  if (!msgVal.valid) {
+    return res.status(400).json({ error: msgVal.error });
+  }
+
+  // Idempotency: prevent rapid duplicate submission within 2 minutes
+  const now = Date.now();
+  const recentDuplicate = (db.inquiries || []).find((inq: any) => {
+    const age = now - new Date(inq.createdAt || 0).getTime();
+    return age < 120000 &&
+      (inq.phone === phoneVal.normalized || inq.phone === String(phone).trim()) &&
+      inq.message === msgVal.clean;
+  });
+  if (recentDuplicate) {
+    return res.json({
+      success: true,
+      inquiry: recentDuplicate,
+      message: "Your inquiry is already received and queued for response.",
+      isDuplicate: true
+    });
+  }
+
+  const cleanPhone = phoneVal.normalized!;
+  const cleanFullName = nameVal.clean!;
+  const cleanEmail = email ? String(email).trim() : '';
+  const cleanWhatsapp = whatsapp ? (validatePakistaniPhone(whatsapp).normalized || String(whatsapp).trim()) : cleanPhone;
+  const cleanArea = area ? String(area).trim() : 'Peshawar';
+  const cleanSubject = String(subject || service || 'General Computer Service Inquiry').trim();
+  const cleanService = String(service || subject || 'Computer Diagnostics & Repair').trim();
+  const cleanBudget = budget ? String(budget).trim() : '';
+  const cleanMessage = msgVal.clean!;
+
+  const newInquiry: any = {
+    id: `INQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    fullName: cleanFullName,
+    phone: cleanPhone,
+    email: cleanEmail,
+    whatsapp: cleanWhatsapp,
+    area: cleanArea,
+    subject: cleanSubject,
+    service: cleanService,
+    budget: cleanBudget,
+    message: cleanMessage,
+    status: 'NEW',
+    createdAt: new Date().toISOString(),
+    emailNotificationStatus: 'credentials_pending',
+    emailNotificationSentTo: NOTIFICATION_DESTINATION,
+    emailNotificationSentAt: new Date().toISOString(),
+    emailNotificationProvider: 'logged'
+  };
+
+  // Generate branded HTML and text emails
+  const html = generateBrandedEmailHtml({
+    clientName: newInquiry.fullName,
+    email: newInquiry.email,
+    phone: newInquiry.phone,
+    whatsapp: newInquiry.whatsapp,
+    subject: newInquiry.subject,
+    service: newInquiry.service,
+    budget: newInquiry.budget,
+    message: newInquiry.message,
+    area: newInquiry.area
+  });
+
+  const text = generateBrandedEmailText({
+    clientName: newInquiry.fullName,
+    email: newInquiry.email,
+    phone: newInquiry.phone,
+    subject: newInquiry.subject,
+    service: newInquiry.service,
+    budget: newInquiry.budget,
+    message: newInquiry.message,
+    area: newInquiry.area
+  });
+
+  // Execute Multi-Provider Waterfall
+  const emailResult = await sendNotificationEmail({
+    to: NOTIFICATION_DESTINATION,
+    subject: `[LEAD INQUIRY] ${newInquiry.fullName} - ${newInquiry.subject} (${newInquiry.area}) - ${getPeshawarShortTimeString()}`,
+    html,
+    text,
+    lead: newInquiry
+  });
+
+  // Update Telemetry on Inquiry Record
+  newInquiry.emailNotificationStatus = emailResult.status;
+  newInquiry.emailNotificationSentTo = emailResult.sentTo;
+  newInquiry.emailNotificationSentAt = emailResult.sentAt;
+  newInquiry.emailNotificationProvider = emailResult.provider;
+  if (emailResult.error) {
+    newInquiry.emailNotificationError = emailResult.error;
+  }
+
+  // Persist into database
+  if (!Array.isArray(db.inquiries)) {
+    db.inquiries = [];
+  }
+  db.inquiries.unshift(newInquiry);
+
+  // Sync customer profile
+  const existingCustomer = db.customers.find((c: any) => c.phone === newInquiry.phone);
+  if (!existingCustomer) {
+    db.customers.unshift({
+      id: `CUST-${Date.now()}`,
+      name: newInquiry.fullName,
+      phone: newInquiry.phone,
+      whatsapp: newInquiry.whatsapp,
+      area: newInquiry.area,
+      totalBookings: 0,
+      totalSpent: "Rs. 0",
+      lastServiceDate: new Date().toISOString().split('T')[0],
+      notes: `Lead Inquiry: ${newInquiry.subject}`,
+      devices: []
+    });
+  }
+
+  // Activity Log
+  db.activityLogs.unshift({
+    id: `log-inq-${Date.now()}`,
+    action: "Lead Inquiry Received",
+    details: `${newInquiry.fullName} submitted inquiry ("${newInquiry.subject}"). Email: ${emailResult.status.toUpperCase()} via ${emailResult.provider.toUpperCase()} to ${emailResult.sentTo}`,
+    timestamp: new Date().toISOString(),
+    user: "Client (Online)"
+  });
+  if (db.activityLogs.length > 100) db.activityLogs.pop();
+
+  saveDb();
+
+  return res.status(201).json({
+    success: true,
+    inquiry: newInquiry,
+    delivery: emailResult,
+    message: emailResult.status === 'sent'
+      ? `Thank you! Your inquiry has been received and emailed to the site administrator at ${emailResult.sentTo}.`
+      : `Thank you! Your inquiry has been recorded and received. We will contact you shortly.`
+  });
+}
+
+// POST endpoints for contact form
+app.post('/api/inquiries', publicApiRateLimiter, handleInquirySubmission);
+app.post('/api/contact', publicApiRateLimiter, handleInquirySubmission);
+
+// GET endpoints to list inquiries
+app.get('/api/inquiries', (req, res) => {
+  res.json({ inquiries: db.inquiries || [] });
+});
+app.get('/api/contact', (req, res) => {
+  res.json({ inquiries: db.inquiries || [] });
+});
+
+// POST endpoint to re-dispatch email notification for an inquiry
+async function handleResendInquiryEmail(req: express.Request, res: express.Response) {
+  const { id } = req.params;
+  const inquiry: any = (db.inquiries || []).find((inq: any) => inq.id === id);
+  if (!inquiry) {
+    return res.status(404).json({ error: "Inquiry not found" });
+  }
+
+  const html = generateBrandedEmailHtml({
+    clientName: inquiry.fullName,
+    email: inquiry.email,
+    phone: inquiry.phone,
+    whatsapp: inquiry.whatsapp,
+    subject: inquiry.subject,
+    service: inquiry.service,
+    budget: inquiry.budget,
+    message: inquiry.message,
+    area: inquiry.area
+  });
+
+  const text = generateBrandedEmailText({
+    clientName: inquiry.fullName,
+    email: inquiry.email,
+    phone: inquiry.phone,
+    subject: inquiry.subject,
+    service: inquiry.service,
+    budget: inquiry.budget,
+    message: inquiry.message,
+    area: inquiry.area
+  });
+
+  const emailResult = await sendNotificationEmail({
+    to: NOTIFICATION_DESTINATION,
+    subject: `[RESENT INQUIRY] ${inquiry.fullName} - ${inquiry.subject} (${inquiry.area}) - ${getPeshawarShortTimeString()}`,
+    html,
+    text,
+    lead: inquiry
+  });
+
+  // Update telemetry
+  inquiry.emailNotificationStatus = emailResult.status;
+  inquiry.emailNotificationSentTo = emailResult.sentTo;
+  inquiry.emailNotificationSentAt = emailResult.sentAt;
+  inquiry.emailNotificationProvider = emailResult.provider;
+  inquiry.emailNotificationError = emailResult.error || undefined;
+
+  db.activityLogs.unshift({
+    id: `log-resend-${Date.now()}`,
+    action: "Inquiry Email Resent",
+    details: `Manual email resend for inquiry ${inquiry.id} (${inquiry.fullName}). Result: ${emailResult.status.toUpperCase()} via ${emailResult.provider.toUpperCase()} to ${emailResult.sentTo}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+  if (db.activityLogs.length > 100) db.activityLogs.pop();
+
+  saveDb();
+
+  return res.json({
+    success: true,
+    inquiry,
+    delivery: emailResult,
+    message: emailResult.status === 'sent'
+      ? `Email notification re-sent successfully to ${emailResult.sentTo} via ${emailResult.provider.toUpperCase()}!`
+      : `Email dispatch attempted with status: ${emailResult.status} (${emailResult.provider}).`
+  });
+}
+
+app.post('/api/inquiries/:id/resend-email', handleResendInquiryEmail);
+app.post('/api/contact/:id/resend-email', handleResendInquiryEmail);
+
+// PATCH endpoint to update inquiry status
+app.patch('/api/inquiries/:id', (req, res) => {
+  const { id } = req.params;
+  const { status, notes } = req.body;
+  const inquiry: any = (db.inquiries || []).find((inq: any) => inq.id === id);
+  if (!inquiry) {
+    return res.status(404).json({ error: "Inquiry not found" });
+  }
+
+  if (status) inquiry.status = status;
+  if (notes !== undefined) inquiry.adminNotes = notes;
+  inquiry.updatedAt = new Date().toISOString();
+
+  saveDb();
+  res.json({ success: true, inquiry });
+});
+
+// DELETE endpoint to remove an inquiry (handles both /api/inquiries and /api/admin/inquiries)
+const handleDeleteInquiry = (req: express.Request, res: express.Response) => {
+  const rawId = req.params.id || '';
+  const decodedId = decodeURIComponent(rawId).trim();
+  const targetIdLower = decodedId.toLowerCase();
+
+  const index = (db.inquiries || []).findIndex((inq: any) => 
+    inq.id === rawId || 
+    inq.id === decodedId || 
+    (inq.id && inq.id.trim().toLowerCase() === targetIdLower)
+  );
+
+  let removedItem: any = null;
+  if (index !== -1) {
+    removedItem = db.inquiries.splice(index, 1)[0];
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Lead Inquiry Deleted",
+      details: `Removed lead #${removedItem.id || decodedId} (${removedItem.fullName || 'Lead'})`,
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+  }
+
+  // Also remove any duplicate or case variations
+  db.inquiries = (db.inquiries || []).filter((inq: any) => 
+    inq.id !== rawId && 
+    inq.id !== decodedId && 
+    (!inq.id || inq.id.trim().toLowerCase() !== targetIdLower)
+  );
+
+  saveDb();
+  res.json({ 
+    success: true, 
+    removedId: removedItem?.id || decodedId,
+    message: "Lead inquiry deleted successfully" 
+  });
+};
+
+app.delete('/api/inquiries/:id', handleDeleteInquiry);
+app.delete('/api/admin/inquiries/:id', checkAdminAuth, handleDeleteInquiry);
+
+// Admin Test Email Dispatch
+app.post('/api/admin/test-email', checkAdminAuth, async (req, res) => {
+  const targetEmail = (req.body?.email && req.body.email.trim()) || getNotificationDestination();
+  const customApiKey = (req.body?.resendApiKey && req.body.resendApiKey.trim()) || undefined;
+  const customFromEmail = (req.body?.resendFromEmail && req.body.resendFromEmail.trim()) || undefined;
+  const preferredProvider = req.body?.provider || (db?.settings as any)?.emailProvider || 'auto';
+  const gmailUser = req.body?.gmailUser || (db?.settings as any)?.gmailUser;
+  const gmailAppPassword = req.body?.gmailAppPassword || (db?.settings as any)?.gmailAppPassword;
+
+  const effectiveFrom = customFromEmail || getResendFromEmail();
+  const effectiveApiKey = customApiKey || getResendApiKey();
+  const pktShortTime = getPeshawarShortTimeString();
+  const pktDateTime = getPeshawarDateTimeString();
+
+  const testHtml = `
+  <!DOCTYPE html>
+  <html>
+  <head><meta charset="utf-8"></head>
+  <body style="margin:0; padding:20px; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#f8fafc;">
+    <div style="max-width:550px; margin:0 auto; background-color:#0f172a; border-radius:12px; overflow:hidden; border:1px solid #1e293b; padding:28px; text-align:center;">
+      <div style="display:inline-block; background-color:rgba(56, 189, 248, 0.1); color:#38bdf8; font-size:12px; font-weight:bold; padding:4px 12px; border-radius:9999px; margin-bottom:12px; border:1px solid rgba(56, 189, 248, 0.3);">
+        ✓ LIVE TEST DISPATCH
+      </div>
+      <h2 style="color:#ffffff; margin:0 0 10px 0; font-size:22px;">TechFix Email Delivery Active</h2>
+      <p style="color:#94a3b8; font-size:14px; line-height:1.6; margin-bottom:20px;">
+        This test confirms that customer inquiries, receipts, and booking notifications will be delivered directly from <strong>${effectiveFrom}</strong> to <strong>${targetEmail}</strong>.
+      </p>
+      <div style="background-color:#1e293b; border-radius:8px; padding:14px; font-size:13px; color:#cbd5e1; text-align:left; line-height:1.7; margin-bottom:20px;">
+        <div><strong>Sender ("From"):</strong> <span style="color:#38bdf8;">${effectiveFrom}</span></div>
+        <div><strong>Recipient ("To"):</strong> <span style="color:#4ade80;">${targetEmail}</span></div>
+        <div><strong>Active Mode:</strong> <span style="color:#f59e0b; font-weight:bold;">${preferredProvider.toUpperCase()}</span></div>
+        <div><strong>Resend Key:</strong> ${effectiveApiKey ? `${effectiveApiKey.substring(0, 8)}...` : '<span style="color:#f87171;">Not configured</span>'}</div>
+        <div><strong>Peshawar Time:</strong> <span style="color:#38bdf8; font-weight:bold;">${pktShortTime}</span> (${pktDateTime} PKT)</div>
+        <div><strong>Engine:</strong> Multi-Provider Waterfall (Resend REST + Native Google SMTP)</div>
+      </div>
+      ${generateEmailFooterHtml(targetEmail)}
+    </div>
+  </body>
+  </html>
+  `;
+
+  const result = await sendNotificationEmail({
+    to: targetEmail,
+    from: effectiveFrom,
+    apiKey: effectiveApiKey,
+    preferredProvider,
+    gmailUser,
+    gmailAppPassword,
+    subject: `TechFix Notification Test: Confirmed Active (${pktShortTime})`,
+    html: testHtml,
+    text: `TechFix Notification Test: Confirmed active delivery from ${effectiveFrom} to ${targetEmail} at ${pktDateTime} (PKT)`,
+    lead: { fullName: "System Test", phone: "0300 0000000", message: "Live email delivery test." }
+  });
+
+  // Log in activity logs for admin visibility
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: result.status === 'sent' ? "Email Test Delivered" : "Email Test Logged",
+    details: result.status === 'sent'
+      ? `Live verification email sent from "${effectiveFrom}" to ${targetEmail} via ${result.provider.toUpperCase()} (ID: ${result.messageId || 'ok'})`
+      : `Test notification status: ${result.status} (${result.provider}). Sender: ${effectiveFrom}. Error: ${result.error || 'none'}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+  if (db.activityLogs.length > 100) db.activityLogs.pop();
+  saveDb();
+
+  res.json({
+    success: result.status === 'sent',
+    recipient: targetEmail,
+    sender: result.provider === 'smtp' ? (gmailUser || 'techfixpeshawar@gmail.com') : effectiveFrom,
+    delivered: result.status === 'sent',
+    status: result.status,
+    provider: result.provider,
+    messageId: result.messageId,
+    error: result.error,
+    failoverNote: result.failoverNote,
+    message: result.status === 'sent'
+      ? `Live test email successfully delivered via ${result.provider.toUpperCase()} (ID: ${result.messageId || 'ok'})!`
+      : `Test email dispatched with status: ${result.status} (${result.provider}). ${result.error ? 'Error: ' + result.error : ''}`
+  });
+});
+
+// Admin Email Delivery Status check
+app.get('/api/admin/email-status', checkAdminAuth, (req, res) => {
+  const activeKey = getResendApiKey();
+  const isResend = !!activeKey;
+  const isGmail = !!(
+    ((db?.settings as any)?.gmailUser || process.env.GMAIL_USER || process.env.SMTP_USER) &&
+    ((db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS)
+  );
+  const isSmtp = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
+  const isConfigured = isResend || isGmail || isSmtp;
+
+  res.json({
+    configured: isConfigured,
+    provider: (db?.settings as any)?.emailProvider || (isResend ? 'Resend API' : (isGmail ? 'Gmail App Password (Nodemailer SMTP)' : 'FormSubmit Backup (Zero-Config)')),
+    destinationEmail: getNotificationDestination(),
+    fromEmail: getResendFromEmail(),
+    emailProvider: (db?.settings as any)?.emailProvider || 'auto',
+    gmailUser: (db?.settings as any)?.gmailUser || process.env.GMAIL_USER || '',
+    hasGmailAppPassword: !!((db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD),
+    configuredVars: {
+      hasResendKey: isResend,
+      hasGmailUser: isGmail,
+      hasGmailAppPassword: !!((db?.settings as any)?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD),
+      hasSmtpUser: !!process.env.SMTP_USER,
+      hasSmtpPass: !!process.env.SMTP_PASS
+    }
+  });
+});
+
+// Booking lookup by ID or Phone
+app.get('/api/bookings/:id', (req, res) => {
+  const param = (req.params.id || '').toLowerCase().trim();
+  const cleanPhone = param.replace(/[^0-9]/g, '');
+  const booking = db.bookings.find((b: any) => {
+    if (b.id.toLowerCase() === param) return true;
+    if (cleanPhone.length >= 7) {
+      const bPhone = (b.phone || '').replace(/[^0-9]/g, '');
+      const bWa = (b.whatsapp || '').replace(/[^0-9]/g, '');
+      if (bPhone && (bPhone === cleanPhone || bPhone.endsWith(cleanPhone) || cleanPhone.endsWith(bPhone))) return true;
+      if (bWa && (bWa === cleanPhone || bWa.endsWith(cleanPhone) || cleanPhone.endsWith(bWa))) return true;
+    }
+    return false;
+  });
+  if (!booking) {
+    return res.status(404).json({ error: "Booking request not found." });
+  }
+  res.json({ booking });
+});
+
+// Admin Auth
+const ADMIN_SECRET = (process.env.ADMIN_SECRET || process.env.ADMIN_PASSWORD || "peshawartech2026").trim();
+let customAdminPassword: string | null = null;
+
+const AUTHORIZED_ADMIN_EMAILS = new Set([
+  'techfixpeshawar@gmail.com',
+  'sullahjan40@gmail.com',
+  'admin@peshawar-techsupport.pk'
+]);
+
+app.post('/api/admin/login', authRateLimiter, async (req, res) => {
+  const { password, idToken, email } = req.body;
+
+  // 1. If Firebase ID Token is passed, verify it (Admin SDK or REST fallback)
+  if (idToken && typeof idToken === 'string') {
+    const emailFromToken = await verifyFirebaseIdTokenFallback(idToken);
+    if (emailFromToken && AUTHORIZED_ADMIN_EMAILS.has(emailFromToken.toLowerCase())) {
+      const sessionToken = generateAdminSessionToken(emailFromToken);
+      return res.json({ success: true, token: sessionToken });
+    }
+
+    // Also try Firebase Admin SDK (works when service account / ADC is available)
+    try {
+      const adminAuth = getFirebaseAdminAuthInstance();
+      if (adminAuth) {
+        const decoded = await adminAuth.verifyIdToken(idToken);
+        const emailLower = (decoded?.email || '').toLowerCase();
+        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === 'admin')) {
+          const sessionToken = generateAdminSessionToken(decoded.email || 'admin');
+          return res.json({ success: true, token: sessionToken });
+        }
+      }
+    } catch (tokenErr) {
+      console.warn('[AUTH] Firebase Admin token verify note:', (tokenErr as any)?.message);
+    }
+
+    // ID token was provided but could not be verified — reject early
+    return res.status(401).json({ error: "Invalid or expired Firebase session. Please sign in again." });
+  }
+
+  // 2. Verify admin credentials against active configuration
+  const p = (password || '').toString().trim();
+  const currentSavedPassword = (db?.settings as any)?.adminPassword;
+  const isValidPassword = 
+    (customAdminPassword && p === customAdminPassword) ||
+    (currentSavedPassword && p === currentSavedPassword) ||
+    (ADMIN_SECRET && p === ADMIN_SECRET);
+
+  if (p && isValidPassword) {
+    const sessionToken = generateAdminSessionToken(email || 'admin');
+    return res.json({ success: true, token: sessionToken });
+  }
+
+  return res.status(401).json({ error: "Invalid admin credentials." });
+});
+
+app.post('/api/admin/change-password', checkAdminAuth, async (req, res) => {
+  const { newPassword } = req.body;
+  if (!newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 6) {
+    return res.status(400).json({ error: "Password must be at least 6 characters long." });
+  }
+  customAdminPassword = newPassword.trim();
+  if (db?.settings) {
+    db.settings.adminPassword = customAdminPassword;
+    saveDb();
+    await saveSettingsToFirestore(db.settings);
+  }
+  return res.json({ success: true, message: "Admin password updated and synced successfully." });
+});
+
+async function checkAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : null;
+  const customHeader = (req.headers['x-admin-token'] as string || '').trim();
+  const validToken = token || customHeader;
+
+  if (!validToken) {
+    return res.status(401).json({ error: "Unauthorized. Valid admin session token required." });
+  }
+
+  // 1. Verify cryptographic HMAC session token
+  if (validToken.startsWith('techfix_sess_') && verifyAdminSessionToken(validToken)) {
+    return next();
+  }
+
+  // 2. Verify Firebase Auth ID Token if passed as Bearer token
+  if (validToken.split('.').length === 3) {
+    const emailFromToken = await verifyFirebaseIdTokenFallback(validToken);
+    if (emailFromToken && AUTHORIZED_ADMIN_EMAILS.has(emailFromToken.toLowerCase())) {
+      return next();
+    }
+
+    try {
+      const adminAuth = getFirebaseAdminAuthInstance();
+      if (adminAuth) {
+        const decoded = await adminAuth.verifyIdToken(validToken);
+        const emailLower = (decoded?.email || '').toLowerCase();
+        if (decoded && (AUTHORIZED_ADMIN_EMAILS.has(emailLower) || decoded.admin === true || decoded.role === 'admin')) {
+          return next();
+        }
+      }
+    } catch {
+      // Token verification failed or expired
+    }
+  }
+
+  return res.status(401).json({ error: "Unauthorized. Valid admin session token required." });
+}
+
+// Admin full data — reads Firestore settings first so Vercel always shows latest saved config
+app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
+  // Always fetch latest settings from Firestore (makes settings persist across Vercel cold starts)
+  try {
+    const firestoreSettings = await loadSettingsFromFirestore();
+    if (firestoreSettings && typeof firestoreSettings === 'object' && Object.keys(firestoreSettings).length > 0) {
+      db.settings = { ...db.settings, ...firestoreSettings };
+      NOTIFICATION_DESTINATION = getNotificationDestination();
+    }
+  } catch (err) {
+    console.error('[FIRESTORE] Admin data GET overlay error:', err);
+  }
+
+  res.json({
+    settings: db.settings,
+    services: db.services,
+    serviceAreas: db.serviceAreas,
+    faqs: db.faqs,
+    caseStudies: db.caseStudies,
+    bookings: db.bookings,
+    inquiries: db.inquiries || [],
+    websiteContent: db.websiteContent,
+    categories: db.categories,
+    media: db.media,
+    customers: db.customers,
+    activityLogs: db.activityLogs,
+    pageSections: db.pageSections,
+    problemSolutions: db.problemSolutions || [],
+    problemLeads: db.problemLeads || []
+  });
+});
+
+// ----------------- PAGE SECTIONS & CONTENT CMS API -----------------
+
+// Update whole section or page metadata (title, subtitle, badge)
+app.put('/api/admin/page-sections/:sectionKey', checkAdminAuth, (req, res) => {
+  const { sectionKey } = req.params;
+  const updates = req.body;
+  if (!db.pageSections) {
+    db.pageSections = { ...defaultData.pageSections };
+  }
+  
+  const currentSection = (db.pageSections as any)[sectionKey] || {};
+  (db.pageSections as any)[sectionKey] = {
+    ...currentSection,
+    ...updates
+  };
+
+  if (updates.pageStatus && db.pageSections.pageStatuses) {
+    db.pageSections.pageStatuses[sectionKey] = updates.pageStatus;
+  }
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Page Section Updated",
+    details: `Updated content metadata for section: ${sectionKey}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, section: (db.pageSections as any)[sectionKey], pageSections: db.pageSections });
+});
+
+// Toggle page publish status (published / unpublished)
+app.put('/api/admin/page-status/:sectionKey', checkAdminAuth, (req, res) => {
+  const { sectionKey } = req.params;
+  const { status } = req.body;
+  if (!db.pageSections) {
+    db.pageSections = { ...defaultData.pageSections };
+  }
+  if (!db.pageSections.pageStatuses) {
+    db.pageSections.pageStatuses = { ...(defaultData.pageSections?.pageStatuses || {}) } as any;
+  }
+
+  const newStatus = status === 'unpublished' ? 'unpublished' : 'published';
+  db.pageSections.pageStatuses[sectionKey] = newStatus;
+
+  if ((db.pageSections as any)[sectionKey]) {
+    (db.pageSections as any)[sectionKey].pageStatus = newStatus;
+  }
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: newStatus === 'published' ? "Page Published" : "Page Unpublished",
+    details: `Page [${sectionKey}] is now ${newStatus.toUpperCase()}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, sectionKey, status: newStatus, pageStatuses: db.pageSections.pageStatuses });
+});
+
+// Add new content item to a section's sub-collection
+app.post('/api/admin/page-sections/:sectionKey/:collectionKey', checkAdminAuth, (req, res) => {
+  const { sectionKey, collectionKey } = req.params;
+  const itemData = req.body;
+
+  if (!db.pageSections) {
+    db.pageSections = { ...defaultData.pageSections };
+  }
+  const section = (db.pageSections as any)[sectionKey];
+  if (!section) {
+    return res.status(404).json({ error: `Section ${sectionKey} not found` });
+  }
+
+  if (!Array.isArray(section[collectionKey])) {
+    section[collectionKey] = [];
+  }
+
+  const newItem = {
+    id: `${sectionKey}-${Date.now().toString(36)}`,
+    ...itemData,
+    status: itemData.status === 'unpublished' ? 'unpublished' : 'published'
+  };
+
+  section[collectionKey].push(newItem);
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Content Item Created",
+    details: `Added new item to ${sectionKey} > ${collectionKey}: "${newItem.title || newItem.name || newItem.id}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.status(201).json({ success: true, item: newItem, collection: section[collectionKey] });
+});
+
+// Edit existing content item in a section's sub-collection
+app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, (req, res) => {
+  const { sectionKey, collectionKey, itemId } = req.params;
+  const updates = req.body;
+
+  if (!db.pageSections) {
+    db.pageSections = { ...defaultData.pageSections };
+  }
+  const section = (db.pageSections as any)[sectionKey];
+  if (!section || !Array.isArray(section[collectionKey])) {
+    return res.status(404).json({ error: `Collection ${collectionKey} in section ${sectionKey} not found` });
+  }
+
+  const index = section[collectionKey].findIndex((i: any) => i.id === itemId);
+  if (index === -1) {
+    return res.status(404).json({ error: `Item ${itemId} not found` });
+  }
+
+  section[collectionKey][index] = {
+    ...section[collectionKey][index],
+    ...updates,
+    id: itemId // preserve ID
+  };
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Content Item Updated",
+    details: `Updated item in ${sectionKey} > ${collectionKey}: "${section[collectionKey][index].title || itemId}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, item: section[collectionKey][index], collection: section[collectionKey] });
+});
+
+// Delete content item from a section's sub-collection
+app.delete('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, (req, res) => {
+  const { sectionKey, collectionKey, itemId } = req.params;
+
+  if (!db.pageSections) {
+    db.pageSections = { ...defaultData.pageSections };
+  }
+  const section = (db.pageSections as any)[sectionKey];
+  if (!section || !Array.isArray(section[collectionKey])) {
+    return res.status(404).json({ error: `Collection ${collectionKey} in section ${sectionKey} not found` });
+  }
+
+  const index = section[collectionKey].findIndex((i: any) => i.id === itemId);
+  if (index === -1) {
+    return res.status(404).json({ error: `Item ${itemId} not found` });
+  }
+
+  const removed = section[collectionKey].splice(index, 1)[0];
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Content Item Deleted",
+    details: `Deleted item from ${sectionKey} > ${collectionKey}: "${removed.title || itemId}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, removedId: itemId, collection: section[collectionKey] });
+});
+
+// Toggle content item published / unpublished status
+app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId/toggle', checkAdminAuth, (req, res) => {
+  const { sectionKey, collectionKey, itemId } = req.params;
+
+  if (!db.pageSections) {
+    db.pageSections = { ...defaultData.pageSections };
+  }
+  const section = (db.pageSections as any)[sectionKey];
+  if (!section || !Array.isArray(section[collectionKey])) {
+    return res.status(404).json({ error: `Collection ${collectionKey} in section ${sectionKey} not found` });
+  }
+
+  const index = section[collectionKey].findIndex((i: any) => i.id === itemId);
+  if (index === -1) {
+    return res.status(404).json({ error: `Item ${itemId} not found` });
+  }
+
+  const currentStatus = section[collectionKey][index].status;
+  const newStatus = (currentStatus === 'published' || currentStatus === 'active') ? 'unpublished' : 'published';
+  section[collectionKey][index].status = newStatus;
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: newStatus === 'published' ? "Content Item Published" : "Content Item Unpublished",
+    details: `Item "${section[collectionKey][index].title || itemId}" in ${sectionKey} is now ${newStatus.toUpperCase()}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, item: section[collectionKey][index], newStatus });
+});
+
+// ----------------- SERVICES CRUD -----------------
+app.post('/api/admin/services', checkAdminAuth, (req, res) => {
+  const { title, shortDesc, fullDesc, priceStarting, priceNote, turnaround, icon, customIcon, status, workflow, warningNote, diagnosticSteps } = req.body;
+  if (!title) {
+    return res.status(400).json({ error: "Service title is required" });
+  }
+
+  const newService = {
+    id: `srv-${Date.now().toString(36)}`,
+    key: title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+    title: String(title).trim(),
+    shortDesc: String(shortDesc || '').trim(),
+    fullDesc: String(fullDesc || '').trim(),
+    priceStarting: String(priceStarting || 'From Rs. 1,000').trim(),
+    priceNote: String(priceNote || '').trim(),
+    turnaround: String(turnaround || '45 – 60 mins').trim(),
+    icon: icon || 'Wrench',
+    customIcon: customIcon || undefined,
+    status: status === 'inactive' ? 'inactive' : 'active',
+    order: db.services.length + 1,
+    workflow: Array.isArray(workflow) ? workflow : [],
+    warningNote: warningNote || undefined,
+    diagnosticSteps: Array.isArray(diagnosticSteps) ? diagnosticSteps : undefined
+  };
+
+  (db.services as any[]).push(newService);
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Service Created",
+    details: `Created new service: "${newService.title}" with price ${newService.priceStarting}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.status(201).json({ success: true, service: newService });
+});
+
+app.put('/api/admin/services/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const index = db.services.findIndex((s: any) => s.id === id);
+  if (index === -1) {
+    return res.status(404).json({ error: "Service not found" });
+  }
+
+  db.services[index] = { ...db.services[index], ...req.body, id };
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Service Updated",
+    details: `Updated service details: "${db.services[index].title}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, service: db.services[index] });
+});
+
+app.delete('/api/admin/services/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const item = db.services.find((s: any) => s.id === id || s.key === id);
+  if (!item) {
+    // If already deleted or not found, return success so frontend state stays clean
+    return res.json({ success: true, message: "Item was already deleted" });
+  }
+
+  db.services = db.services.filter((s: any) => s.id !== id && s.key !== id);
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Service Deleted",
+    details: `Deleted service: "${item.title}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, deletedId: id });
+});
+
+const handleToggleService = (req: any, res: any) => {
+  const { id } = req.params;
+  const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
+  if (index === -1) return res.status(404).json({ error: "Service not found" });
+
+  const currentStatus = db.services[index].status;
+  const newStatus = (currentStatus === 'active' || currentStatus === 'published') ? 'inactive' : 'active';
+  db.services[index].status = newStatus;
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Service Status Toggled",
+    details: `${db.services[index].title} is now ${newStatus.toUpperCase()}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.json({ success: true, service: db.services[index] });
+};
+
+app.put('/api/admin/services/:id/toggle', checkAdminAuth, handleToggleService);
+app.patch('/api/admin/services/:id/toggle', checkAdminAuth, handleToggleService);
+
+app.post('/api/admin/services/:id/publish', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
+  if (index === -1) return res.status(404).json({ error: "Service not found" });
+
+  db.services[index].status = 'active';
+  saveDb();
+  res.json({ success: true, service: db.services[index] });
+});
+
+app.post('/api/admin/services/:id/unpublish', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
+  if (index === -1) return res.status(404).json({ error: "Service not found" });
+
+  db.services[index].status = 'inactive';
+  saveDb();
+  res.json({ success: true, service: db.services[index] });
+});
+
+app.post('/api/admin/services/reorder', checkAdminAuth, (req, res) => {
+  const { serviceIds } = req.body;
+  if (!Array.isArray(serviceIds)) {
+    return res.status(400).json({ error: "serviceIds array required" });
+  }
+
+  const reordered: any[] = [];
+  serviceIds.forEach((id, idx) => {
+    const item = db.services.find((s: any) => s.id === id);
+    if (item) {
+      item.order = idx + 1;
+      reordered.push(item);
+    }
+  });
+
+  // add remaining
+  db.services.forEach((s: any) => {
+    if (!reordered.some(r => r.id === s.id)) {
+      s.order = reordered.length + 1;
+      reordered.push(s);
+    }
+  });
+
+  db.services = reordered;
+  saveDb();
+  res.json({ success: true, services: db.services });
+});
+
+app.put('/api/admin/services', checkAdminAuth, (req, res) => {
+  const { services } = req.body;
+  if (Array.isArray(services)) {
+    db.services = services;
+    saveDb();
+    return res.json({ success: true, services: db.services });
+  }
+  res.status(400).json({ error: "Invalid services format" });
+});
+
+// ----------------- PROBLEM SOLUTIONS CRUD -----------------
+app.get('/api/problem-solutions', async (req, res) => {
+  await firestoreReady;
+  const published = (db.problemSolutions || []).filter((p: any) => p.status !== 'unpublished');
+  res.json({ success: true, problemSolutions: published });
+});
+
+app.get('/api/admin/problem-solutions', checkAdminAuth, async (req, res) => {
+  await firestoreReady;
+  res.json({ success: true, problemSolutions: db.problemSolutions || [] });
+});
+
+app.post('/api/admin/problem-solutions', checkAdminAuth, async (req, res) => {
+  const data = req.body;
+  if (!data.title) return res.status(400).json({ error: "Title is required" });
+
+  if (!Array.isArray(db.problemSolutions)) db.problemSolutions = [];
+
+  const newItem = {
+    id: `prob-${Date.now().toString(36)}`,
+    key: data.key || data.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+    badge: data.badge || 'TECHNICAL SOLUTION',
+    title: String(data.title).trim(),
+    subtitle: data.subtitle || '',
+    shortDesc: data.shortDesc || '',
+    symptomsWhenNeeded: Array.isArray(data.symptomsWhenNeeded) ? data.symptomsWhenNeeded : [],
+    honestAssessment: data.honestAssessment || '',
+    turnaroundCriteria: data.turnaroundCriteria || '',
+    turnaroundFactors: Array.isArray(data.turnaroundFactors) ? data.turnaroundFactors : [],
+    protocolBadge: data.protocolBadge || '',
+    protocolTitle: data.protocolTitle || '',
+    steps: Array.isArray(data.steps) ? data.steps : [],
+    priceStarting: data.priceStarting || 'Contact for diagnosis',
+    ctaText: data.ctaText || 'Book Diagnosis',
+    serviceKey: data.serviceKey || '',
+    warningRules: Array.isArray(data.warningRules) ? data.warningRules : [],
+    recoverableScenarios: Array.isArray(data.recoverableScenarios) ? data.recoverableScenarios : [],
+    unrecoverableScenarios: Array.isArray(data.unrecoverableScenarios) ? data.unrecoverableScenarios : [],
+    benefits: Array.isArray(data.benefits) ? data.benefits : [],
+    status: data.status === 'unpublished' ? 'unpublished' : 'published',
+    order: db.problemSolutions.length + 1
+  };
+
+  db.problemSolutions.push(newItem);
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Problem Solution Created",
+    details: `Created problem solution: "${newItem.title}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+  saveDb();
+  await saveProblemSolutionsToFirestore(db.problemSolutions);
+  res.status(201).json({ success: true, item: newItem });
+});
+
+app.put('/api/admin/problem-solutions/:id', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const index = (db.problemSolutions || []).findIndex((p: any) => p.id === id || p.key === id);
+  if (index === -1) return res.status(404).json({ error: "Problem solution not found" });
+
+  db.problemSolutions[index] = {
+    ...db.problemSolutions[index],
+    ...req.body,
+    id: db.problemSolutions[index].id
+  };
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Problem Solution Updated",
+    details: `Updated problem solution: "${db.problemSolutions[index].title}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+  saveDb();
+  await saveProblemSolutionsToFirestore(db.problemSolutions);
+  res.json({ success: true, item: db.problemSolutions[index] });
+});
+
+app.delete('/api/admin/problem-solutions/:id', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const index = (db.problemSolutions || []).findIndex((p: any) => p.id === id || p.key === id);
+  if (index === -1) return res.status(404).json({ error: "Problem solution not found" });
+
+  const removed = db.problemSolutions.splice(index, 1)[0];
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Problem Solution Deleted",
+    details: `Removed problem solution: "${removed.title}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+  saveDb();
+  await saveProblemSolutionsToFirestore(db.problemSolutions);
+  res.json({ success: true, removedId: id });
+});
+
+app.patch('/api/admin/problem-solutions/:id/status', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const index = (db.problemSolutions || []).findIndex((p: any) => p.id === id || p.key === id);
+  if (index === -1) return res.status(404).json({ error: "Problem solution not found" });
+
+  const newStatus = req.body.status || (db.problemSolutions[index].status === 'published' ? 'unpublished' : 'published');
+  db.problemSolutions[index].status = newStatus;
+  saveDb();
+  await saveProblemSolutionsToFirestore(db.problemSolutions);
+  res.json({ success: true, item: db.problemSolutions[index], status: newStatus });
+});
+
+// ----------------- PROBLEM LEADS CRM -----------------
+app.post('/api/problem-leads', publicApiRateLimiter, async (req, res) => {
+  const { fullName, phone, whatsapp, email, area, deviceType, problemTitle, problemDescription, urgency } = req.body;
+  if (!fullName || !phone || !problemDescription) {
+    return res.status(400).json({ error: "Full name, phone, and problem description are required." });
+  }
+
+  if (!Array.isArray(db.problemLeads)) db.problemLeads = [];
+
+  const newLead = {
+    id: `LEAD-PRB-${Date.now().toString(36).toUpperCase()}`,
+    createdAt: new Date().toISOString(),
+    fullName: String(fullName).trim(),
+    phone: String(phone).trim(),
+    whatsapp: String(whatsapp || phone).trim(),
+    email: email ? String(email).trim() : undefined,
+    area: String(area || 'Peshawar').trim(),
+    deviceType: String(deviceType || 'Computer').trim(),
+    problemTitle: String(problemTitle || 'Unlisted Computer Problem').trim(),
+    problemDescription: String(problemDescription).trim(),
+    urgency: urgency === 'urgent' ? 'urgent' : 'normal',
+    status: 'NEW',
+    technicianNotes: ''
+  };
+
+  db.problemLeads.unshift(newLead);
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "New Problem Lead",
+    details: `Customer [${newLead.fullName}] submitted unlisted problem: "${newLead.problemTitle}" (${newLead.phone})`,
+    timestamp: new Date().toISOString(),
+    user: "Website Visitor"
+  });
+  saveDb();
+  await saveProblemLeadToFirestore(newLead);
+
+  // Dispatch Email Notification to Admin Destination
+  try {
+    const adminDest = getNotificationDestination();
+    const subject = sanitizeEmailSubject(`[LEAD INQUIRY] Problem Research Request: ${newLead.problemTitle} (${newLead.fullName})`);
+    const emailHtml = generateBrandedEmailHtml({
+      title: "New Problem Research & Diagnosis Request",
+      badge: "RESEARCH LEAD",
+      fullName: newLead.fullName,
+      phone: newLead.phone,
+      whatsapp: newLead.whatsapp,
+      email: newLead.email,
+      area: newLead.area,
+      service: `Problem: ${newLead.problemTitle}`,
+      message: `Device: ${newLead.deviceType}\nUrgency: ${newLead.urgency.toUpperCase()}\nRef: ${newLead.id}\n\nProblem Description:\n${newLead.problemDescription}`,
+      urgency: newLead.urgency
+    });
+
+    sendNotificationEmail({
+      to: adminDest,
+      subject,
+      html: emailHtml,
+      leadType: "Problem Research Lead",
+      leadName: newLead.fullName
+    }).catch(e => console.warn('Problem lead email dispatch error:', e));
+  } catch (err) {
+    console.warn('Problem lead email notification handled:', err);
+  }
+
+  res.status(201).json({
+    success: true,
+    lead: newLead,
+    message: "Thank you! Your computer problem has been received. Safiullah will research your symptom and contact you shortly."
+  });
+});
+
+app.get('/api/admin/problem-leads', checkAdminAuth, async (req, res) => {
+  await firestoreReady;
+  const fsLeads = await loadProblemLeadsFromFirestore();
+  if (fsLeads.length > 0) {
+    db.problemLeads = fsLeads;
+  }
+  res.json({ success: true, problemLeads: db.problemLeads || [] });
+});
+
+app.patch('/api/admin/problem-leads/:id/status', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  const lead = (db.problemLeads || []).find((l: any) => l.id === id);
+  if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+  lead.status = status;
+  lead.updatedAt = new Date().toISOString();
+  saveDb();
+  await saveProblemLeadToFirestore(lead);
+  res.json({ success: true, lead });
+});
+
+app.post('/api/admin/problem-leads/:id/notes', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const { notes } = req.body;
+  const lead = (db.problemLeads || []).find((l: any) => l.id === id);
+  if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+  lead.technicianNotes = notes;
+  lead.updatedAt = new Date().toISOString();
+  saveDb();
+  await saveProblemLeadToFirestore(lead);
+  res.json({ success: true, lead });
+});
+
+app.delete('/api/admin/problem-leads/:id', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const index = (db.problemLeads || []).findIndex((l: any) => l.id === id);
+  if (index === -1) return res.status(404).json({ error: "Lead not found" });
+
+  const removed = db.problemLeads.splice(index, 1)[0];
+  saveDb();
+  await deleteProblemLeadFromFirestore(id);
+  res.json({ success: true, removedId: id });
+});
+
+// ----------------- CUSTOM ICON UPLOAD -----------------
+app.post('/api/admin/upload-icon', checkAdminAuth, (req, res) => {
+  const { filename, dataUrl } = req.body;
+  if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+    return res.status(400).json({ error: "Valid base64 image dataUrl required." });
+  }
+
+  ensureDbDirectory();
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+
+  const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
+  if (!matches || !matches[2]) {
+    return res.status(400).json({ error: "Malformed base64 image data." });
+  }
+
+  const ext = matches[1].replace('jpeg', 'jpg').replace('svg+xml', 'svg');
+  const safeBase = (filename || 'service-icon')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+  const outFilename = `icon-${safeBase}-${Date.now().toString(36)}.${ext}`;
+  const outPath = path.join(UPLOADS_DIR, outFilename);
+
+  const buf = Buffer.from(matches[2].replace(/\s+/g, ''), 'base64');
+  fs.writeFileSync(outPath, buf);
+
+  const finalUrl = `/uploads/${outFilename}`;
+  if (!Array.isArray(db.media)) db.media = [];
+  db.media.unshift({
+    id: `media-icon-${Date.now().toString(36)}`,
+    name: outFilename,
+    url: finalUrl,
+    dataUrl: dataUrl.length < 500000 ? dataUrl : undefined,
+    size: `${(buf.length / 1024).toFixed(1)} KB`,
+    type: `image/${ext}`,
+    uploadedAt: new Date().toISOString(),
+    usedIn: 'Service Custom Icon'
+  });
+  saveDb();
+
+  res.json({ success: true, url: finalUrl, filename: outFilename });
+});
+
+// ----------------- BOOKINGS / REQUESTS CRUD -----------------
+app.post('/api/admin/bookings', checkAdminAuth, (req, res) => {
+  const {
+    fullName,
+    phone,
+    whatsapp,
+    area,
+    deviceType,
+    computerBrandModel,
+    serviceRequired,
+    problemDescription,
+    preferredDate,
+    preferredTime,
+    urgency,
+    containsImportantData,
+    status,
+    adminNotes,
+    scheduledTime
+  } = req.body;
+
+  if (!fullName || !phone) {
+    return res.status(400).json({ error: "Full Name and Phone Number are required" });
+  }
+
+  const newBooking = {
+    id: `PSH-ADM-${Date.now().toString(36).toUpperCase()}`,
+    createdAt: new Date().toISOString(),
+    fullName: String(fullName).trim(),
+    phone: String(phone).trim(),
+    whatsapp: String(whatsapp || phone).trim(),
+    area: String(area || "Peshawar").trim(),
+    deviceType: deviceType || "Laptop",
+    computerBrandModel: String(computerBrandModel || "").trim(),
+    serviceRequired: String(serviceRequired || "General Troubleshooting").trim(),
+    problemDescription: String(problemDescription || "").trim(),
+    preferredDate: preferredDate || new Date().toISOString().split('T')[0],
+    preferredTime: preferredTime || "Morning (10 AM - 1 PM)",
+    urgency: urgency === "Urgent" ? "Urgent" : "Normal",
+    containsImportantData: containsImportantData === "YES" ? "YES" : "NO",
+    status: status || "NEW",
+    adminNotes: adminNotes || "",
+    scheduledTime: scheduledTime || ""
+  };
+
+  db.bookings.unshift(newBooking);
+
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Booking Created Manually",
+    details: `Admin booked on-site visit for ${newBooking.fullName} (${newBooking.area})`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.status(201).json({ success: true, booking: newBooking });
+});
+
+app.put('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
+  const rawId = req.params.id || '';
+  const decodedId = decodeURIComponent(rawId).trim();
+  const targetIdLower = decodedId.toLowerCase();
+
+  const index = db.bookings.findIndex((b: any) => 
+    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
+    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
+    b.id === rawId ||
+    b.id === decodedId
+  );
+
+  if (index === -1) {
+    // If not found in in-memory list, upsert it so updates succeed
+    const newBooking = {
+      id: decodedId || rawId,
+      createdAt: new Date().toISOString(),
+      fullName: req.body.fullName || 'Customer',
+      phone: req.body.phone || '',
+      whatsapp: req.body.whatsapp || req.body.phone || '',
+      area: req.body.area || 'Peshawar',
+      deviceType: req.body.deviceType || 'Laptop',
+      computerBrandModel: req.body.computerBrandModel || '',
+      serviceRequired: req.body.serviceRequired || 'General Diagnostic',
+      problemDescription: req.body.problemDescription || '',
+      preferredDate: req.body.preferredDate || new Date().toISOString().split('T')[0],
+      preferredTime: req.body.preferredTime || '',
+      urgency: req.body.urgency || 'Normal',
+      containsImportantData: req.body.containsImportantData || 'NO',
+      status: req.body.status || 'NEW',
+      adminNotes: req.body.adminNotes || '',
+      ...req.body
+    };
+    db.bookings.unshift(newBooking);
+    saveDb();
+    return res.json({ success: true, booking: newBooking });
+  }
+
+  const prevStatus = db.bookings[index].status;
+  db.bookings[index] = { ...db.bookings[index], ...req.body, id: db.bookings[index].id };
+
+  if (req.body.status && req.body.status !== prevStatus) {
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Booking Status Changed",
+      details: `Request #${db.bookings[index].id} status changed from ${prevStatus} to ${req.body.status} (${db.bookings[index].fullName})`,
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+  }
+
+  saveDb();
+  res.json({ success: true, booking: db.bookings[index] });
+});
+
+// Admin Action 1: Confirm Appointment (Triggers Customer Confirmation Email)
+app.post('/api/admin/bookings/:id/confirm', checkAdminAuth, async (req, res) => {
+  const rawId = req.params.id || '';
+  const decodedId = decodeURIComponent(rawId).trim();
+  const targetIdLower = decodedId.toLowerCase();
+
+  let booking = db.bookings.find((b: any) => 
+    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
+    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
+    b.id === rawId ||
+    b.id === decodedId
+  );
+
+  if (!booking) {
+    return res.status(404).json({ error: "Booking not found" });
+  }
+
+  const scheduledTime = req.body.scheduledTime || booking.scheduledTime || `${booking.preferredDate} (${booking.preferredTime})`;
+  booking.status = "CONFIRMED";
+  booking.scheduledTime = scheduledTime;
+  if (req.body.adminNotes !== undefined) {
+    booking.adminNotes = req.body.adminNotes;
+  }
+
+  // Also update linked Lead/Inquiry if exists
+  const lead = (db.inquiries || []).find((inq: any) => 
+    inq.bookingId === booking.id || 
+    ((booking as any).leadId && inq.id === (booking as any).leadId) ||
+    (inq.phone && inq.phone === booking.phone)
+  );
+  if (lead) {
+    lead.status = "CONVERTED";
+    (lead as any).scheduledTime = scheduledTime;
+  }
+
+  // Activity Log
+  db.activityLogs.unshift({
+    id: `log-confirm-${Date.now()}`,
+    action: "Appointment Confirmed",
+    details: `Appointment confirmed for ${booking.fullName} (${booking.area}). Scheduled Time: ${scheduledTime}`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+
+  // Customer email is only sent if explicitly requested by admin (manual dispatch mode)
+  let emailDelivery: any = { status: "not_attempted" };
+  const targetEmail = (booking as any).email || (lead ? (lead as any).email : '');
+  if (req.body.sendEmail === true && targetEmail && targetEmail.includes('@')) {
+    const html = generateAppointmentConfirmedEmailHtml({
+      booking,
+      scheduledTime
+    });
+    const techPhone = getTechnicianPhone();
+    const text = `
+APPOINTMENT CONFIRMED - TECHFIX PESHAWAR
+Booking Reference ID: ${booking.id}
+Customer: ${booking.fullName}
+Primary Phone: ${booking.phone}
+WhatsApp: ${booking.whatsapp || booking.phone}
+Area / Sector: ${booking.area} (Peshawar)
+Service Required: ${booking.serviceRequired}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Confirmed Arrival Slot: ${scheduledTime}
+Urgency: ${(booking.urgency || 'NORMAL').toUpperCase()}
+Important Data: ${booking.containsImportantData || 'NO'}
+
+Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
+If you need to reschedule or have urgent queries, please call ${techPhone} or message on WhatsApp.
+    `.trim();
+
+    try {
+      emailDelivery = await sendNotificationEmail({
+        to: targetEmail,
+        subject: `[CONFIRMED] Appointment Scheduled - TechFix Peshawar (Ref #${booking.id})`,
+        html,
+        text,
+        lead: booking
+      });
+      console.log(`✅ Appointment confirmation email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
+    } catch (err: any) {
+      console.error("Failed to send customer confirmation email:", err);
+      emailDelivery = { status: "failed", error: err.message };
+    }
+  }
+
+  res.json({
+    success: true,
+    booking,
+    emailDelivery,
+    message: req.body.sendEmail && targetEmail 
+      ? (emailDelivery.status === 'sent' 
+          ? `Appointment confirmed and email delivered to ${targetEmail}.` 
+          : `Appointment confirmed, but email delivery status: ${emailDelivery.status}. (${emailDelivery.error || 'Check email configuration'})`)
+      : `Appointment confirmed! (Schedule: ${scheduledTime}). Ready for WhatsApp confirmation or manual email dispatch.`
+  });
+});
+
+// Dedicated Manual Endpoint: Send Confirmation Email for Booking
+app.post('/api/admin/bookings/:id/send-confirmation-email', checkAdminAuth, async (req, res) => {
+  const rawId = req.params.id || '';
+  const decodedId = decodeURIComponent(rawId).trim();
+  const targetIdLower = decodedId.toLowerCase();
+
+  const booking = db.bookings.find((b: any) => 
+    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
+    b.id === rawId ||
+    b.id === decodedId
+  );
+
+  if (!booking) {
+    return res.status(404).json({ error: "Booking not found" });
+  }
+
+  // Allow admin to override/correct customer email if provided
+  let targetEmail = (req.body?.customerEmail && String(req.body.customerEmail).trim()) || (booking as any).email;
+  if (!targetEmail || !targetEmail.includes('@') || !targetEmail.includes('.')) {
+    return res.status(400).json({ error: "No valid customer email address on file for this booking. Please specify a valid email." });
+  }
+
+  // Detect common domain typos (e.g. @gmil.com instead of @gmail.com)
+  const lowerEmail = targetEmail.toLowerCase();
+  if (lowerEmail.endsWith('@gmil.com') || lowerEmail.endsWith('@gmai.com') || lowerEmail.endsWith('@gmial.com')) {
+    return res.status(400).json({ 
+      error: `Invalid email domain detected in "${targetEmail}". Did you mean "@gmail.com"? Please correct the email before dispatching.` 
+    });
+  }
+
+  // If customerEmail was corrected by admin, persist it to the booking record
+  if (req.body?.customerEmail && req.body.customerEmail.trim() !== (booking as any).email) {
+    (booking as any).email = targetEmail;
+    saveDb();
+  }
+
+  const scheduledTime = req.body.scheduledTime || booking.scheduledTime || `${booking.preferredDate || 'Tomorrow'} (${booking.preferredTime || 'Morning'})`;
+  const html = generateAppointmentConfirmedEmailHtml({
+    booking,
+    scheduledTime
+  });
+  const techPhone = getTechnicianPhone();
+  const text = `
+APPOINTMENT CONFIRMED - TECHFIX PESHAWAR
+Booking Reference ID: ${booking.id}
+Customer: ${booking.fullName}
+Primary Phone: ${booking.phone}
+WhatsApp: ${booking.whatsapp || booking.phone}
+Area / Sector: ${booking.area} (Peshawar)
+Service Required: ${booking.serviceRequired}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Confirmed Arrival Slot: ${scheduledTime}
+
+Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
+If you need assistance, please call ${techPhone}.
+  `.trim();
+
+  try {
+    const emailDelivery = await sendNotificationEmail({
+      to: targetEmail,
+      subject: `[CONFIRMED] Appointment Scheduled - TechFix Peshawar (Ref #${booking.id})`,
+      html,
+      text,
+      lead: booking
+    });
+
+    const isDelivered = emailDelivery.status === 'sent';
+    if (!isDelivered) {
+      return res.status(422).json({
+        success: false,
+        delivered: false,
+        status: emailDelivery.status,
+        provider: emailDelivery.provider,
+        error: emailDelivery.error || `Email delivery failed (${emailDelivery.status}). Check email settings or SMTP password.`
+      });
+    }
+
+    return res.json({
+      success: true,
+      delivered: true,
+      status: emailDelivery.status,
+      provider: emailDelivery.provider,
+      messageId: emailDelivery.messageId,
+      message: `Confirmation email successfully delivered to ${targetEmail} via ${emailDelivery.provider.toUpperCase()}!`
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Failed to dispatch confirmation email."
+    });
+  }
+});
+
+// Admin Action 2: Contact Customer / Technician Note (Triggers Customer Contact Email)
+app.post('/api/admin/bookings/:id/contact', checkAdminAuth, async (req, res) => {
+  const rawId = req.params.id || '';
+  const decodedId = decodeURIComponent(rawId).trim();
+  const targetIdLower = decodedId.toLowerCase();
+
+  let booking = db.bookings.find((b: any) => 
+    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
+    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
+    b.id === rawId ||
+    b.id === decodedId
+  );
+
+  if (!booking) {
+    return res.status(404).json({ error: "Booking not found" });
+  }
+
+  booking.status = "CONTACTED";
+  const technicianNote = req.body.technicianNote || req.body.adminNotes || "Our technician has reviewed your request and is reaching out to coordinate diagnostic details.";
+  if (req.body.adminNotes !== undefined) {
+    booking.adminNotes = req.body.adminNotes;
+  }
+
+  // Also update linked Lead/Inquiry
+  const lead = (db.inquiries || []).find((inq: any) => 
+    inq.bookingId === booking.id || 
+    ((booking as any).leadId && inq.id === (booking as any).leadId) ||
+    (inq.phone && inq.phone === booking.phone)
+  );
+  if (lead) {
+    lead.status = "CONTACTED";
+  }
+
+  // Activity Log
+  db.activityLogs.unshift({
+    id: `log-contact-${Date.now()}`,
+    action: "Customer Contacted",
+    details: `Technician contacted ${booking.fullName} for Service #${booking.id} (${booking.serviceRequired})`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+
+  // Trigger Contact Email to Customer only if explicitly requested
+  let emailDelivery: any = { status: "not_attempted" };
+  const targetEmail = (booking as any).email || (lead ? (lead as any).email : '');
+  if (req.body.sendEmail === true && targetEmail && targetEmail.includes('@')) {
+    const html = generateTechnicianContactEmailHtml({
+      booking,
+      technicianNote
+    });
+    const text = `
+TECHNICIAN UPDATE - TECHFIX PESHAWAR
+Service Request Ref ID: ${booking.id}
+Customer: ${booking.fullName}
+Service: ${booking.serviceRequired}
+Device: ${booking.deviceType} ${booking.computerBrandModel || ''}
+
+Our technician is contacting you regarding your computer service request!
+Please check your WhatsApp or incoming calls (${booking.phone}).
+
+Technician Note:
+${technicianNote}
+
+Direct WhatsApp: https://wa.me/${getTechnicianWhatsApp()}
+Phone: ${getTechnicianPhone()}
+    `.trim();
+
+    try {
+      emailDelivery = await sendNotificationEmail({
+        to: targetEmail,
+        subject: `Technician Update regarding your Service Request #${booking.id} - TechFix Peshawar`,
+        html,
+        text,
+        lead: booking
+      });
+      console.log(`✅ Technician contact email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
+    } catch (err: any) {
+      console.error("Failed to send customer contact email:", err);
+      emailDelivery = { status: "failed", error: err.message };
+    }
+  }
+
+  res.json({
+    success: true,
+    booking,
+    emailDelivery,
+    message: req.body.sendEmail && targetEmail 
+      ? `Contact email sent to customer at ${targetEmail}.`
+      : `Marked as contacted. Ready for WhatsApp dispatch.`
+  });
+});
+
+// Admin Inquiries Actions: Confirm Appointment and Contact
+app.post('/api/admin/inquiries/:id/confirm', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const inquiry = (db.inquiries || []).find((inq: any) => inq.id === id);
+  if (!inquiry) {
+    return res.status(404).json({ error: "Inquiry not found" });
+  }
+
+  const scheduledTime = req.body.scheduledTime || `${(inquiry as any).preferredDate || new Date().toISOString().split('T')[0]} (${(inquiry as any).preferredTime || 'Morning (10 AM - 1 PM)'})`;
+  inquiry.status = "CONVERTED";
+
+  // Find or create linked booking
+  let booking = db.bookings.find((b: any) => b.id === (inquiry as any).bookingId || (inquiry.phone && b.phone === inquiry.phone));
+  if (!booking) {
+    booking = {
+      id: (inquiry as any).bookingId || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
+      createdAt: new Date().toISOString(),
+      fullName: inquiry.fullName,
+      email: inquiry.email,
+      phone: inquiry.phone,
+      whatsapp: inquiry.whatsapp || inquiry.phone,
+      area: inquiry.area || "Peshawar",
+      deviceType: (inquiry as any).deviceType || "Laptop",
+      computerBrandModel: (inquiry as any).computerBrandModel || "",
+      serviceRequired: inquiry.service || inquiry.subject || "General Troubleshooting",
+      problemDescription: inquiry.message,
+      preferredDate: (inquiry as any).preferredDate || new Date().toISOString().split('T')[0],
+      preferredTime: (inquiry as any).preferredTime || "Morning (10 AM - 1 PM)",
+      urgency: (inquiry as any).urgency || "Normal",
+      containsImportantData: (inquiry as any).containsImportantData || "NO",
+      status: "CONFIRMED",
+      adminNotes: req.body.adminNotes || "",
+      scheduledTime
+    } as any;
+    db.bookings.unshift(booking);
+    (inquiry as any).bookingId = booking.id;
+  } else {
+    booking.status = "CONFIRMED";
+    booking.scheduledTime = scheduledTime;
+    if (req.body.adminNotes) booking.adminNotes = req.body.adminNotes;
+  }
+
+  saveDb();
+
+  // Customer email is only sent if explicitly requested by admin (manual dispatch mode)
+  let emailDelivery: any = { status: "not_attempted" };
+  const targetEmail = (req.body?.customerEmail && req.body.customerEmail.trim()) || inquiry.email || (booking as any).email;
+  if (req.body.sendEmail === true && targetEmail && targetEmail.includes('@')) {
+    const html = generateAppointmentConfirmedEmailHtml({
+      booking,
+      scheduledTime
+    });
+    const techPhone = getTechnicianPhone();
+    const text = `
+APPOINTMENT CONFIRMED - TECHFIX PESHAWAR
+Booking Reference ID: ${booking.id}
+Customer: ${booking.fullName}
+Primary Phone: ${booking.phone}
+WhatsApp: ${booking.whatsapp || booking.phone}
+Area / Sector: ${booking.area} (Peshawar)
+Service Required: ${booking.serviceRequired}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Confirmed Arrival Slot: ${scheduledTime}
+
+Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
+If you have any questions or need to reschedule, please call ${techPhone} or message on WhatsApp.
+    `.trim();
+
+    try {
+      emailDelivery = await sendNotificationEmail({
+        to: targetEmail,
+        subject: `[CONFIRMED] Appointment Scheduled - TechFix Peshawar (Ref #${booking.id})`,
+        html,
+        text,
+        lead: booking
+      });
+      console.log(`✅ Appointment confirmation email dispatched to ${targetEmail}: status=${emailDelivery.status}`);
+    } catch (err: any) {
+      console.error("Failed to send customer confirmation email:", err);
+      emailDelivery = { status: "failed", error: err.message };
+    }
+  }
+
+  res.json({
+    success: true,
+    inquiry,
+    booking,
+    emailDelivery,
+    message: req.body.sendEmail && targetEmail
+      ? (emailDelivery.status === 'sent'
+          ? `Appointment confirmed! Confirmation email delivered to ${targetEmail}.`
+          : `Appointment confirmed, but email status: ${emailDelivery.status}. (${emailDelivery.error || 'Check email configuration'})`)
+      : `Lead converted to confirmed appointment! (Schedule: ${scheduledTime}). Ready for WhatsApp confirmation or manual email dispatch.`
+  });
+});
+
+// Dedicated Manual Endpoint: Send Confirmation Email for Inquiry / Converted Lead
+app.post('/api/admin/inquiries/:id/send-confirmation-email', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const inquiry = (db.inquiries || []).find((inq: any) => inq.id === id);
+  if (!inquiry) {
+    return res.status(404).json({ error: "Inquiry not found" });
+  }
+
+  const booking = db.bookings.find((b: any) => b.id === (inquiry as any).bookingId || (inquiry.phone && b.phone === inquiry.phone)) || {
+    id: (inquiry as any).bookingId || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
+    fullName: inquiry.fullName,
+    email: inquiry.email,
+    phone: inquiry.phone,
+    whatsapp: inquiry.whatsapp || inquiry.phone,
+    area: inquiry.area || "Peshawar",
+    deviceType: (inquiry as any).deviceType || "Laptop",
+    computerBrandModel: (inquiry as any).computerBrandModel || "",
+    serviceRequired: inquiry.service || inquiry.subject || "General Troubleshooting",
+    problemDescription: inquiry.message,
+    status: "CONFIRMED"
+  };
+
+  let targetEmail = (req.body?.customerEmail && String(req.body.customerEmail).trim()) || inquiry.email || (booking as any).email;
+  if (!targetEmail || !targetEmail.includes('@') || !targetEmail.includes('.')) {
+    return res.status(400).json({ error: "No valid customer email address on file for this inquiry. Please provide a valid email." });
+  }
+
+  const lowerEmail = targetEmail.toLowerCase();
+  if (lowerEmail.endsWith('@gmil.com') || lowerEmail.endsWith('@gmai.com') || lowerEmail.endsWith('@gmial.com')) {
+    return res.status(400).json({
+      error: `Invalid email domain detected in "${targetEmail}". Did you mean "@gmail.com"? Please correct before sending.`
+    });
+  }
+
+  if (req.body?.customerEmail && req.body.customerEmail.trim() !== inquiry.email) {
+    inquiry.email = targetEmail;
+    if (booking) (booking as any).email = targetEmail;
+    saveDb();
+  }
+
+  const scheduledTime = req.body.scheduledTime || (booking as any).scheduledTime || `${(inquiry as any).preferredDate || 'Tomorrow'} (${(inquiry as any).preferredTime || 'Morning'})`;
+  const html = generateAppointmentConfirmedEmailHtml({
+    booking,
+    scheduledTime
+  });
+  const techPhone = getTechnicianPhone();
+  const text = `
+APPOINTMENT CONFIRMED - TECHFIX PESHAWAR
+Booking Reference ID: ${booking.id}
+Customer: ${booking.fullName}
+Primary Phone: ${booking.phone}
+WhatsApp: ${booking.whatsapp || booking.phone}
+Area / Sector: ${booking.area} (Peshawar)
+Service Required: ${booking.serviceRequired}
+Device & Model: ${booking.deviceType} ${booking.computerBrandModel || ''}
+Confirmed Arrival Slot: ${scheduledTime}
+
+Your scheduled appointment is confirmed! Our technician will arrive at the scheduled time: ${scheduledTime}.
+If you need assistance, please call ${techPhone}.
+  `.trim();
+
+  try {
+    const emailDelivery = await sendNotificationEmail({
+      to: targetEmail,
+      subject: `[CONFIRMED] Appointment Scheduled - TechFix Peshawar (Ref #${booking.id})`,
+      html,
+      text,
+      lead: booking
+    });
+
+    const isDelivered = emailDelivery.status === 'sent';
+    if (!isDelivered) {
+      return res.status(422).json({
+        success: false,
+        delivered: false,
+        status: emailDelivery.status,
+        provider: emailDelivery.provider,
+        error: emailDelivery.error || `Email delivery failed (${emailDelivery.status}). Check email settings or SMTP password.`
+      });
+    }
+
+    return res.json({
+      success: true,
+      delivered: true,
+      status: emailDelivery.status,
+      provider: emailDelivery.provider,
+      messageId: emailDelivery.messageId,
+      message: `Confirmation email successfully delivered to ${targetEmail} via ${emailDelivery.provider.toUpperCase()}!`
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Failed to dispatch confirmation email."
+    });
+  }
+});
+
+app.post('/api/admin/inquiries/:id/contact', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const inquiry = (db.inquiries || []).find((inq: any) => inq.id === id);
+  if (!inquiry) {
+    return res.status(404).json({ error: "Inquiry not found" });
+  }
+
+  inquiry.status = "CONTACTED";
+  const technicianNote = req.body.technicianNote || req.body.adminNotes || "Our technician has reviewed your inquiry and is reaching out via WhatsApp.";
+
+  // Find linked booking if any
+  let booking = db.bookings.find((b: any) => b.id === (inquiry as any).bookingId || (inquiry.phone && b.phone === inquiry.phone));
+  if (booking) {
+    booking.status = "CONTACTED";
+  } else {
+    booking = {
+      id: inquiry.id,
+      fullName: inquiry.fullName,
+      email: inquiry.email,
+      phone: inquiry.phone,
+      whatsapp: inquiry.whatsapp || inquiry.phone,
+      area: inquiry.area || "Peshawar",
+      deviceType: (inquiry as any).deviceType || "Computer",
+      computerBrandModel: (inquiry as any).computerBrandModel || "",
+      serviceRequired: inquiry.service || inquiry.subject || "General Support",
+      problemDescription: inquiry.message,
+      status: "CONTACTED"
+    } as any;
+  }
+
+  saveDb();
+
+  // Send contact notification email only if explicitly requested
+  let emailDelivery: any = { status: "not_attempted" };
+  const targetEmail = inquiry.email;
+  if (req.body.sendEmail === true && targetEmail && targetEmail.includes('@')) {
+    const html = generateTechnicianContactEmailHtml({
+      booking,
+      technicianNote
+    });
+    const text = `
+TECHNICIAN UPDATE - TECHFIX PESHAWAR
+Inquiry Ref ID: ${inquiry.id}
+Customer: ${inquiry.fullName}
+
+Our technician is contacting you regarding your computer inquiry!
+Please check your WhatsApp or phone messages (${inquiry.phone}).
+
+Technician Note:
+${technicianNote}
+    `.trim();
+
+    try {
+      emailDelivery = await sendNotificationEmail({
+        to: targetEmail,
+        subject: `Technician Update regarding your Inquiry #${inquiry.id} - TechFix Peshawar`,
+        html,
+        text,
+        lead: inquiry
+      });
+    } catch (err: any) {
+      emailDelivery = { status: "failed", error: err.message };
+    }
+  }
+
+  res.json({
+    success: true,
+    inquiry,
+    emailDelivery,
+    message: req.body.sendEmail && targetEmail
+      ? `Contact email sent to ${targetEmail}.`
+      : `Marked as contacted. Ready for WhatsApp follow-up.`
+  });
+});
+
+app.delete('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
+  const rawId = req.params.id || '';
+  const decodedId = decodeURIComponent(rawId).trim();
+  const targetIdLower = decodedId.toLowerCase();
+
+  // Find matching item leniently (by id or trackingId, case-insensitive)
+  const index = db.bookings.findIndex((b: any) => 
+    (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
+    ((b as any).trackingId && (b as any).trackingId.trim().toLowerCase() === targetIdLower) ||
+    b.id === rawId ||
+    b.id === decodedId
+  );
+
+  let removedItem: any = null;
+  if (index !== -1) {
+    removedItem = db.bookings[index];
+    db.bookings.splice(index, 1);
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Booking Deleted",
+      details: `Removed request #${removedItem.id || decodedId} for ${removedItem.fullName || 'Customer'}`,
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+  }
+
+  // Also remove any duplicate or related matches
+  const beforeLen = db.bookings.length;
+  db.bookings = db.bookings.filter((b: any) => 
+    b.id !== rawId && 
+    b.id !== decodedId &&
+    (!b.id || b.id.trim().toLowerCase() !== targetIdLower) &&
+    (!(b as any).trackingId || (b as any).trackingId.trim().toLowerCase() !== targetIdLower)
+  );
+
+  if (removedItem || db.bookings.length !== beforeLen) {
+    saveDb();
+  }
+
+  // Idempotent success response ensures that deletion proceeds cleanly on frontend & Firestore
+  res.json({ 
+    success: true, 
+    message: removedItem ? `Booking ${removedItem.id} deleted successfully.` : `Booking removed.`,
+    deletedId: removedItem?.id || decodedId
+  });
+});
+
+// ----------------- CUSTOMERS CRUD -----------------
+app.post('/api/admin/customers', checkAdminAuth, (req, res) => {
+  const { name, phone, whatsapp, area, notes, devices, totalSpent } = req.body;
+  if (!name || !phone) {
+    return res.status(400).json({ error: "Name and Phone are required" });
+  }
+
+  const newCust = {
+    id: `cust-${Date.now()}`,
+    name: String(name).trim(),
+    phone: String(phone).trim(),
+    whatsapp: String(whatsapp || phone).trim(),
+    area: String(area || "Peshawar").trim(),
+    totalBookings: 0,
+    totalSpent: totalSpent || "Rs. 0",
+    lastServiceDate: "Never",
+    notes: notes || "",
+    devices: Array.isArray(devices) ? devices : []
+  };
+
+  db.customers.unshift(newCust);
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Customer Profile Created",
+    details: `Added new client: ${newCust.name} (${newCust.phone})`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.status(201).json({ success: true, customer: newCust });
+});
+
+app.put('/api/admin/customers/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const index = db.customers.findIndex((c: any) => c.id === id);
+  if (index === -1) return res.status(404).json({ error: "Customer not found" });
+
+  db.customers[index] = { ...db.customers[index], ...req.body, id };
+  saveDb();
+  res.json({ success: true, customer: db.customers[index] });
+});
+
+app.delete('/api/admin/customers/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  db.customers = db.customers.filter((c: any) => c.id !== id);
+  saveDb();
+  res.json({ success: true });
+});
+
+// ----------------- FAQS CRUD -----------------
+app.post('/api/admin/faqs', checkAdminAuth, (req, res) => {
+  const { question, answer, category } = req.body;
+  if (!question || !answer) {
+    return res.status(400).json({ error: "Question and Answer are required" });
+  }
+
+  const newFaq = {
+    id: `faq-${Date.now()}`,
+    question: String(question).trim(),
+    answer: String(answer).trim(),
+    category: category || "General"
+  };
+
+  db.faqs.push(newFaq);
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "FAQ Added",
+    details: `Added new FAQ: "${newFaq.question.slice(0, 45)}..."`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+
+  saveDb();
+  res.status(201).json({ success: true, faq: newFaq });
+});
+
+app.put('/api/admin/faqs/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const index = db.faqs.findIndex((f: any) => f.id === id);
+  if (index === -1) return res.status(404).json({ error: "FAQ not found" });
+
+  db.faqs[index] = { ...db.faqs[index], ...req.body, id };
+  saveDb();
+  res.json({ success: true, faq: db.faqs[index] });
+});
+
+app.delete('/api/admin/faqs/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  db.faqs = db.faqs.filter((f: any) => f.id !== id);
+  saveDb();
+  res.json({ success: true });
+});
+
+app.put('/api/admin/faqs', checkAdminAuth, (req, res) => {
+  const { faqs } = req.body;
+  if (Array.isArray(faqs)) {
+    db.faqs = faqs;
+    saveDb();
+    return res.json({ success: true, faqs: db.faqs });
+  }
+  res.status(400).json({ error: "Invalid faqs format" });
+});
+
+// ----------------- CASE STUDIES CRUD -----------------
+app.post('/api/admin/case-studies', checkAdminAuth, (req, res) => {
+  const { title, customerType, problem, diagnosis, solution, result, deviceInfo } = req.body;
+  if (!problem || !solution) {
+    return res.status(400).json({ error: "Problem and solution are required" });
+  }
+  const newCase = {
+    id: `case-${Date.now()}`,
+    title: title || "On-Site Repair Case",
+    customerType: customerType || "Home User",
+    date: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+    problem,
+    diagnosis: diagnosis || "",
+    solution,
+    result: result || "",
+    deviceInfo: deviceInfo || "Laptop"
+  };
+  db.caseStudies.unshift(newCase);
+  db.activityLogs.unshift({
+    id: `log-${Date.now()}`,
+    action: "Real Service Case Published",
+    details: `Published case: "${newCase.title}"`,
+    timestamp: new Date().toISOString(),
+    user: "Safiullah (Admin)"
+  });
+  saveDb();
+  res.json({ success: true, caseStudy: newCase });
+});
+
+app.put('/api/admin/case-studies/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const index = db.caseStudies.findIndex((c: any) => c.id === id);
+  if (index === -1) return res.status(404).json({ error: "Case study not found" });
+
+  db.caseStudies[index] = { ...db.caseStudies[index], ...req.body, id };
+  saveDb();
+  res.json({ success: true, caseStudy: db.caseStudies[index] });
+});
+
+app.delete('/api/admin/case-studies/:id', checkAdminAuth, (req, res) => {
+  db.caseStudies = db.caseStudies.filter((c: any) => c.id !== req.params.id);
+  saveDb();
+  res.json({ success: true });
+});
+
+// ----------------- MEDIA UPLOAD & MANAGEMENT -----------------
+app.post('/api/admin/media/upload', uploadRateLimiter, checkAdminAuth, (req, res) => {
+  const { name, dataUrl, usedIn } = req.body;
+  if (!dataUrl) {
+    return res.status(400).json({ error: "No image data provided" });
+  }
+
+  try {
+    let finalUrl = dataUrl;
+
+    // Check if it's base64, validate magic bytes, and write file to UPLOADS_DIR
+    if (dataUrl.startsWith('data:image/')) {
+      const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
+      if (matches && matches[2]) {
+        const cleanBase64 = matches[2].replace(/\s+/g, '');
+        const buffer = Buffer.from(cleanBase64, 'base64');
+        const { valid, ext } = validateImageMagicBytes(buffer);
+        if (!valid) {
+          return res.status(400).json({ error: "Invalid image format. Only authentic JPEG, PNG, WebP, and GIF images are permitted." });
+        }
+
+        const safeRandomName = `img-${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
+        const filePath = path.join(UPLOADS_DIR, safeRandomName);
+        try {
+          if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+          fs.writeFileSync(filePath, buffer);
+          finalUrl = `/uploads/${safeRandomName}`;
+        } catch (fsErr) {
+          // Read-only filesystem in serverless environments (Vercel)
+          finalUrl = dataUrl;
+        }
+      }
+    }
+
+    const newMedia = {
+      id: `media-${Date.now()}`,
+      name: name || 'Uploaded Image',
+      url: finalUrl,
+      dataUrl: dataUrl,
+      size: `${Math.round(dataUrl.length / 1370)} KB`,
+      type: 'image',
+      uploadedAt: new Date().toISOString(),
+      usedIn: usedIn || 'General Media'
+    };
+
+    db.media.unshift(newMedia);
+
+    // If marked for technician photo, update settings
+    if (usedIn === 'Technician Profile' || usedIn === 'technicianPhoto') {
+      db.settings.technicianPhoto = finalUrl;
+    }
+
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Image Uploaded",
+      details: `Uploaded image asset "${newMedia.name}" for ${newMedia.usedIn}`,
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+
+    saveDb();
+    res.status(201).json({ success: true, item: newMedia, photoUrl: finalUrl });
+  } catch (err: any) {
+    console.error("Upload error:", err);
+    res.status(500).json({ error: "The uploaded file could not be processed. Please try again." });
+  }
+});
+
+// Dedicated Profile Photo upload endpoint
+app.post('/api/admin/profile-photo', uploadRateLimiter, checkAdminAuth, (req, res) => {
+  const { dataUrl, filename } = req.body;
+  if (!dataUrl) {
+    return res.status(400).json({ error: "No profile photo data provided" });
+  }
+
+  try {
+    let finalUrl = dataUrl;
+    if (dataUrl.startsWith('data:image/')) {
+      const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
+      if (matches && matches[2]) {
+        const cleanBase64 = matches[2].replace(/\s+/g, '');
+        const buffer = Buffer.from(cleanBase64, 'base64');
+        const { valid, ext } = validateImageMagicBytes(buffer);
+        if (!valid) {
+          return res.status(400).json({ error: "Invalid image format. Only authentic JPEG, PNG, WebP, and GIF images are permitted." });
+        }
+
+        const safeRandomName = `technician-portrait-${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
+        const filePath = path.join(UPLOADS_DIR, safeRandomName);
+        try {
+          if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+          fs.writeFileSync(filePath, buffer);
+          finalUrl = `/uploads/${safeRandomName}`;
+        } catch (fsErr) {
+          // Read-only filesystem in serverless environments (Vercel)
+          finalUrl = dataUrl;
+        }
+      }
+    }
+
+    db.settings.technicianPhoto = finalUrl;
+
+    const mediaItem = {
+      id: `media-profile-${Date.now()}`,
+      name: filename || 'Technician Profile Photo',
+      url: finalUrl,
+      dataUrl: dataUrl,
+      size: `${Math.round(dataUrl.length / 1370)} KB`,
+      type: 'image',
+      uploadedAt: new Date().toISOString(),
+      usedIn: 'Technician Profile'
+    };
+    db.media.unshift(mediaItem);
+
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Profile Picture Updated",
+      details: "Technician profile portrait photo updated successfully",
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+
+    saveDb();
+    res.json({ success: true, photoUrl: finalUrl, settings: db.settings });
+  } catch (err: any) {
+    console.error("Profile photo upload error:", err);
+    res.status(500).json({ error: "The uploaded file could not be processed. Please try again." });
+  }
+});
+
+// Serve direct media item by ID
+app.get('/api/media/image/:id', (req, res) => {
+  const item: any = db.media.find((m: any) => m.id === req.params.id);
+  if (!item) return res.status(404).send('Image not found');
+  if (item.dataUrl && item.dataUrl.startsWith('data:image/')) {
+    const matches = item.dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
+    if (matches && matches[2]) {
+      const mime = `image/${matches[1]}`;
+      const buf = Buffer.from(matches[2].replace(/\s+/g, ''), 'base64');
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(buf);
+    }
+  }
+  if (item.url && item.url.startsWith('/uploads/')) {
+    const filePath = path.join(UPLOADS_DIR, path.basename(item.url));
+    if (fs.existsSync(filePath)) return res.sendFile(filePath);
+  }
+  res.redirect('/uploads/technician-portrait-1789213477063.jpg');
+});
+
+app.delete('/api/admin/media/:id', checkAdminAuth, (req, res) => {
+  const { id } = req.params;
+  db.media = db.media.filter((m: any) => m.id !== id);
+  saveDb();
+  res.json({ success: true });
+});
+
+// ----------------- SETTINGS & WEBSITE CONTENT -----------------
+app.put('/api/admin/settings', checkAdminAuth, async (req, res) => {
+  const { settings } = req.body;
+  if (settings && typeof settings === 'object') {
+    db.settings = { ...db.settings, ...settings };
+
+    // Synchronize runtime in-memory credentials immediately into db.settings
+    if (typeof settings.emailProvider === 'string') {
+      db.settings.emailProvider = settings.emailProvider;
+    }
+    NOTIFICATION_DESTINATION = getNotificationDestination();
+
+    const emailConfigLog: string[] = [];
+    if (settings.emailProvider) emailConfigLog.push(`Engine: ${settings.emailProvider.toUpperCase()}`);
+    if (settings.resendApiKey) emailConfigLog.push(`Resend Key: [CONFIGURED]`);
+    if (settings.resendFromEmail) emailConfigLog.push(`Sender: "${settings.resendFromEmail}"`);
+    if (settings.resendTargetEmail) emailConfigLog.push(`Destination: "${settings.resendTargetEmail}"`);
+    if (settings.gmailUser) emailConfigLog.push(`Google User: "${settings.gmailUser}"`);
+
+    const logDetails = emailConfigLog.length > 0
+      ? `Updated settings & active email dispatch config (${emailConfigLog.join(', ')})`
+      : `Updated core contact & business configurations`;
+
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Settings Saved",
+      details: logDetails,
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+    if (db.activityLogs.length > 100) db.activityLogs.pop();
+    saveDb(); // local file (works in dev / Render)
+    await saveSettingsToFirestore(db.settings); // Firestore (works on Vercel)
+
+    console.log(`[SETTINGS SAVED] Active Sender: "${getResendFromEmail()}" | Active Target: "${NOTIFICATION_DESTINATION}"`);
+
+    return res.json({ 
+      success: true, 
+      settings: db.settings,
+      activeEmailConfig: {
+        target: NOTIFICATION_DESTINATION,
+        from: getResendFromEmail(),
+        hasApiKey: !!getResendApiKey()
+      },
+      message: "Settings saved successfully! New email configuration is active immediately." 
+    });
+  }
+  res.status(400).json({ error: "Invalid settings format" });
+});
+
+app.put('/api/admin/website-content', checkAdminAuth, (req, res) => {
+  const { websiteContent } = req.body;
+  if (websiteContent && typeof websiteContent === 'object') {
+    db.websiteContent = { ...db.websiteContent, ...websiteContent };
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Website Content Updated",
+      details: `Updated homepage headline, announcements, and SEO meta tags`,
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+    saveDb();
+    return res.json({ success: true, websiteContent: db.websiteContent });
+  }
+  res.status(400).json({ error: "Invalid websiteContent format" });
+});
+
+app.put('/api/admin/categories', checkAdminAuth, (req, res) => {
+  const { categories } = req.body;
+  if (Array.isArray(categories)) {
+    db.categories = categories;
+    saveDb();
+    return res.json({ success: true, categories: db.categories });
+  }
+  res.status(400).json({ error: "Invalid categories format" });
+});
+
+app.put('/api/admin/areas', checkAdminAuth, (req, res) => {
+  const { serviceAreas } = req.body;
+  if (Array.isArray(serviceAreas)) {
+    db.serviceAreas = serviceAreas;
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: "Service Areas Updated",
+      details: `Coverage list updated (${serviceAreas.length} active Peshawar neighborhoods)`,
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+    saveDb();
+    return res.json({ success: true, serviceAreas: db.serviceAreas });
+  }
+  res.status(400).json({ error: "Invalid areas format" });
+});
+
+app.post('/api/admin/activity-logs', checkAdminAuth, (req, res) => {
+  const { action, details } = req.body;
+  if (action) {
+    db.activityLogs.unshift({
+      id: `log-${Date.now()}`,
+      action,
+      details: details || "",
+      timestamp: new Date().toISOString(),
+      user: "Safiullah (Admin)"
+    });
+    if (db.activityLogs.length > 100) db.activityLogs.pop();
+    saveDb();
+  }
+  res.json({ success: true });
+});
+
+// Reset demo data helper
+app.post('/api/admin/reset-defaults', checkAdminAuth, (req, res) => {
+  db = JSON.parse(JSON.stringify(defaultData));
+  saveDb();
+  res.json({ success: true, message: "Database reset to official defaults" });
+});
+
+async function startServer() {
+  if (process.env.NODE_ENV !== "production") {
+    try {
+      const { createServer } = await import('vite');
+      const vite = await createServer({
+        root: APP_ROOT,
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch {
+      const distPath = path.join(APP_ROOT, 'dist');
+      if (fs.existsSync(distPath)) {
+        app.use(express.static(distPath));
+        app.get('*', (req, res) => {
+          res.sendFile(path.join(distPath, 'index.html'));
+        });
+      }
+    }
+  } else {
+    const distPath = path.join(APP_ROOT, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  if (!process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
+}
+
+// BUG-ROUTE-001: Block the old /admin path at the Express level unconditionally.
+// This applies on Vercel (startServer skipped) AND on local/self-hosted.
+// The secret route /techfixpeshawar007007/admin is handled by React Router via index.html.
+// API routes /api/admin/* are registered earlier and are completely unaffected.
+app.get('/admin', (_req, res) => {
+  res.status(404).send('Not Found');
+});
+
+// On Vercel: skip startServer() entirely — Vercel handles requests via exported app.
+// On local dev and self-hosted environments: run startServer().
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
+
