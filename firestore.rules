@@ -3,79 +3,71 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ─── PUBLIC CONTENT (website display) ────────────────────────────────────
+    // ─── PUBLIC CONTENT & ADMIN CMS (real-time sync) ─────────────────────────
 
     match /services/{serviceId} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if true;
     }
 
     match /solutions/{solutionId} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if true;
+    }
+
+    match /categories/{categoryId} {
+      allow read, write: if true;
     }
 
     match /faq/{faqId} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if true;
     }
 
     match /caseStudies/{caseStudyId} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if true;
     }
 
     match /page_sections/{sectionId} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if true;
     }
 
     match /media/{mediaId} {
-      allow read: if true;
-      allow write: if false;
+      allow read, write: if true;
     }
 
-    // ─── SETTINGS (read + write from server — no Firebase Auth on server) ────
-    // Security enforced by Express checkAdminAuth middleware (JWT session token)
+    // ─── SETTINGS (admin settings & site config) ────────────────────────────
 
     match /settings/{settingId} {
       allow read, write: if true;
     }
 
-    // ─── PROBLEM LEADS (server reads/writes — no Firebase Auth on server) ────
+    // ─── PROBLEM LEADS ──────────────────────────────────────────────────────
 
     match /problem-leads/{leadId} {
       allow read, write: if true;
     }
 
-    // ─── CUSTOMER SUBMISSIONS (public create, server manages rest) ───────────
+    // ─── CUSTOMER SUBMISSIONS (bookings, inquiries, requests) ───────────────
 
     match /bookings/{bookingId} {
-      allow create: if true;
-      allow read, update, delete: if true;
+      allow read, write: if true;
     }
 
     match /serviceRequests/{requestId} {
-      allow create: if true;
-      allow read, update, delete: if true;
+      allow read, write: if true;
     }
 
     match /requests/{requestId} {
-      allow create: if true;
-      allow read, update, delete: if true;
+      allow read, write: if true;
     }
 
     match /inquiries/{inquiryId} {
-      allow create: if true;
-      allow read, update, delete: if true;
+      allow read, write: if true;
     }
 
     match /contacts/{contactId} {
-      allow create: if true;
-      allow read, update, delete: if true;
+      allow read, write: if true;
     }
 
-    // ─── ADMIN DATA (server read/write only) ─────────────────────────────────
+    // ─── ADMIN DATA ─────────────────────────────────────────────────────────
 
     match /customers/{customerId} {
       allow read, write: if true;
@@ -85,14 +77,22 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    match /activities/{activityId} {
+      allow read, write: if true;
     }
 
-    // ─── DEFAULT DENY ────────────────────────────────────────────────────────
+    match /leads/{leadId} {
+      allow read, write: if true;
+    }
+
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    // ─── CATCH-ALL PERMISSIVE FOR APP COLLECTIONS ───────────────────────────
 
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
   }
 }

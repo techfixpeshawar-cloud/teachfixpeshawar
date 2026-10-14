@@ -28,6 +28,7 @@ import {
 } from 'firebase/firestore';
 import { sendServiceNotificationEmail, sendCustomerInquiryEmail } from './notifications';
 import { fallbackAppData, fallbackPageSections } from './fallbackData';
+import { extractCustomerEmail } from './emailNormalization';
 
 let adminTokenCache: string | null = null;
 
@@ -132,12 +133,15 @@ export async function submitServiceRequest(
     payload.deviceType === 'Laptop' ? 'Laptop' :
     payload.deviceType === 'Desktop' ? 'Desktop' : 'Desktop';
 
+  const normalizedEmail = extractCustomerEmail(payload);
+
   const booking: ServiceRequest = {
     id: reqId,
     fullName: payload.fullName || 'Customer',
     phone: payload.phone || '',
     whatsapp: payload.whatsapp || payload.phone || '',
-    email: payload.email || '',
+    email: normalizedEmail,
+    customerEmail: normalizedEmail,
     area: payload.area || 'Peshawar',
     fullAddress: payload.fullAddress || '',
     serviceRequired: payload.serviceRequired || 'Computer Diagnostics',
@@ -151,7 +155,7 @@ export async function submitServiceRequest(
     status: (payload.status as any) || 'NEW',
     createdAt: timestamp,
     updatedAt: timestamp
-  };
+  } as any;
 
   // 1. Persist to Firestore collections as primary authoritative source
   try {
@@ -166,7 +170,8 @@ export async function submitServiceRequest(
       name: booking.fullName,
       phone: booking.phone,
       whatsapp: booking.whatsapp || booking.phone,
-      email: booking.email || '',
+      email: normalizedEmail,
+      customerEmail: normalizedEmail,
       area: booking.area || 'Peshawar',
       subject: `Service Request: ${booking.serviceRequired} (${booking.deviceType})`,
       service: booking.serviceRequired,
@@ -264,7 +269,8 @@ export async function submitCustomerInquiry(inquiry: {
       fullName: inquiry.fullName,
       name: inquiry.fullName,
       phone: inquiry.phone,
-      email: inquiry.email || '',
+      email: extractCustomerEmail(inquiry) || '',
+      customerEmail: extractCustomerEmail(inquiry) || '',
       area: inquiry.area || 'Peshawar',
       serviceRequired: inquiry.subject || 'Direct Customer Inquiry',
       problemDescription: inquiry.message,
@@ -525,11 +531,73 @@ export async function fetchAdminData(): Promise<AdminDataResponse> {
       : fallbackAppData.caseStudies;
 
     const inquiries: LeadInquiry[] = !inqSnap.empty
-      ? inqSnap.docs.map(d => ({ id: d.id, ...d.data() } as LeadInquiry))
+      ? inqSnap.docs.map(d => {
+          const inqData = d.data();
+          const inqEmail = extractCustomerEmail(inqData);
+          return {
+            id: d.id,
+            ...inqData,
+            email: inqEmail || inqData.email || ''
+          } as LeadInquiry;
+        })
       : [];
 
+    const inqDocs = !inqSnap.empty ? inqSnap.docs.map(d => ({ id: d.id, ...d.data() })) : [];
+    const custDocs = !custSnap.empty ? custSnap.docs.map(d => ({ id: d.id, ...d.data() })) : [];
+
     const bookings: ServiceRequest[] = !reqSnap.empty
-      ? reqSnap.docs.map(d => ({ id: d.id, ...d.data() } as ServiceRequest))
+      ? reqSnap.docs.map(d => {
+          const data = d.data();
+          const canonicalId = d.id || data.id;
+          let customerEmail = extractCustomerEmail(data);
+
+          // Cross-reference linked inquiries if email not directly in requests doc
+          if (!customerEmail && inqDocs.length > 0) {
+            const phoneKey = (data.phone || data.whatsapp || '').replace(/\D/g, '');
+            const matchingInq = inqDocs.find((i: any) => 
+              i.bookingId === canonicalId || 
+              i.id === `inq-${canonicalId}` ||
+              (phoneKey.length >= 7 && (i.phone || '').replace(/\D/g, '') === phoneKey)
+            );
+            if (matchingInq) {
+              customerEmail = extractCustomerEmail(matchingInq);
+            }
+          }
+
+          // Cross-reference customer profiles if still missing
+          if (!customerEmail && custDocs.length > 0) {
+            const phoneKey = (data.phone || data.whatsapp || '').replace(/\D/g, '');
+            if (phoneKey.length >= 7) {
+              const matchingCust = custDocs.find((c: any) => 
+                (c.phone || '').replace(/\D/g, '') === phoneKey
+              );
+              if (matchingCust) {
+                customerEmail = extractCustomerEmail(matchingCust);
+              }
+            }
+          }
+
+          return {
+            ...data,
+            id: canonicalId,
+            fullName: data.fullName || data.name || 'Customer',
+            phone: data.phone || data.whatsapp || '',
+            whatsapp: data.whatsapp || data.phone || '',
+            email: customerEmail || '',
+            customerEmail: customerEmail || '',
+            area: data.area || 'Peshawar',
+            deviceType: data.deviceType || 'Laptop',
+            computerBrandModel: data.computerBrandModel || '',
+            serviceRequired: data.serviceRequired || 'Computer Diagnostics & Repair',
+            problemDescription: data.problemDescription || '',
+            urgency: data.urgency || 'Normal',
+            containsImportantData: data.containsImportantData || 'NO',
+            preferredDate: data.preferredDate || (data.createdAt ? String(data.createdAt).split('T')[0] : ''),
+            preferredTime: data.preferredTime || '',
+            status: data.status || 'NEW',
+            createdAt: data.createdAt || new Date().toISOString()
+          } as ServiceRequest;
+        })
       : [];
 
     const customers: Customer[] = !custSnap.empty
@@ -854,47 +922,60 @@ export async function createBooking(booking: Partial<ServiceRequest>): Promise<{
 
 export async function updateBooking(id: string, updates: Partial<ServiceRequest>): Promise<{ success: boolean; booking: ServiceRequest }> {
   const token = getCachedAdminToken();
+  let serverBooking: ServiceRequest | null = null;
+
+  // Sanitize updates to prevent wiping out existing customer email with empty strings
+  const cleanUpdates: any = { ...updates };
+  if ('email' in cleanUpdates || 'customerEmail' in cleanUpdates) {
+    const norm = extractCustomerEmail(cleanUpdates);
+    if (norm) {
+      cleanUpdates.email = norm;
+      cleanUpdates.customerEmail = norm;
+    } else {
+      // Avoid overwriting Firestore field with empty string or undefined
+      delete cleanUpdates.email;
+      delete cleanUpdates.customerEmail;
+    }
+  }
+
   try {
-    await fetch(`/api/admin/bookings/${id}`, {
+    const res = await fetch(`/api/admin/bookings/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(updates)
+      body: JSON.stringify(cleanUpdates)
     });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.booking) serverBooking = data.booking;
+    }
   } catch (err) {}
 
   try {
     const updatedAt = new Date().toISOString();
     await Promise.allSettled([
-      setDoc(doc(db, 'requests', id), { ...updates, id, updatedAt }, { merge: true }),
-      setDoc(doc(db, 'serviceRequests', id), { ...updates, id, updatedAt }, { merge: true })
+      setDoc(doc(db, 'requests', id), { ...cleanUpdates, id, updatedAt }, { merge: true }),
+      setDoc(doc(db, 'serviceRequests', id), { ...cleanUpdates, id, updatedAt }, { merge: true })
     ]);
   } catch (e) {}
 
-  const devType: 'Laptop' | 'Desktop' | 'Other' = 
-    updates.deviceType === 'Laptop' ? 'Laptop' :
-    updates.deviceType === 'Desktop' ? 'Desktop' : 'Desktop';
+  if (serverBooking) {
+    return { success: true, booking: serverBooking };
+  }
+
+  // Fallback: load existing document from Firestore so we never wipe out fields
+  try {
+    const snap = await getDoc(doc(db, 'requests', id));
+    if (snap.exists()) {
+      return { success: true, booking: { ...snap.data(), ...cleanUpdates, id } as ServiceRequest };
+    }
+  } catch (e) {}
 
   return {
     success: true,
     booking: {
-      id,
-      fullName: updates.fullName || 'Customer',
-      phone: updates.phone || '',
-      whatsapp: updates.whatsapp || '',
-      email: updates.email || '',
-      area: updates.area || 'Peshawar',
-      fullAddress: updates.fullAddress || '',
-      serviceRequired: updates.serviceRequired || 'Computer Service',
-      deviceType: devType,
-      computerBrandModel: updates.computerBrandModel || '',
-      problemDescription: updates.problemDescription || '',
-      urgency: updates.urgency || 'Normal',
-      containsImportantData: updates.containsImportantData || 'NO',
-      preferredDate: updates.preferredDate || '',
-      preferredTime: updates.preferredTime || '',
-      status: updates.status || 'NEW',
-      createdAt: new Date().toISOString()
-    }
+      ...cleanUpdates,
+      id
+    } as ServiceRequest
   };
 }
 
@@ -908,32 +989,67 @@ export async function updateBookingStatus(
 
 export async function confirmBookingAppointment(
   id: string,
-  payload: { scheduledTime: string; adminNotes?: string; sendEmail?: boolean }
+  payload: { scheduledTime: string; adminNotes?: string; sendEmail?: boolean; customerEmail?: string }
 ): Promise<{ success: boolean; booking: ServiceRequest; emailDelivery?: any; message?: string }> {
   const token = getCachedAdminToken();
-  let backendResult: any = null;
-  try {
-    const res = await fetch(`/api/admin/bookings/${encodeURIComponent(id)}/confirm`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(payload)
-    });
-    if (res.ok) {
-      backendResult = await res.json();
-    }
-  } catch (err) {}
 
-  const result = await updateBooking(id, {
-    status: 'CONFIRMED',
-    adminNotes: payload.adminNotes
+  // Primary path: POST /api/admin/bookings/:id/confirm
+  const confirmRes = await fetch(`/api/admin/bookings/${encodeURIComponent(id)}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload)
   });
 
+  if (!confirmRes.ok) {
+    let errMsg = `Server error (${confirmRes.status})`;
+    try {
+      const errData = await confirmRes.json();
+      if (confirmRes.status === 404) {
+        errMsg = errData.error || `Booking record not found on server (id: ${id}). It may have been deleted or the session expired. Please refresh.`;
+      } else if (confirmRes.status === 400) {
+        errMsg = errData.error || 'Validation error. Check the scheduled time field.';
+      } else if (confirmRes.status === 401 || confirmRes.status === 403) {
+        errMsg = 'Authorization error. Please log out and log in again.';
+      } else {
+        errMsg = errData.error || `Server error (${confirmRes.status}). Please try again.`;
+      }
+    } catch (_) {}
+    throw new Error(errMsg);
+  }
+
+  const backendResult = await confirmRes.json();
+
+  // Secondary path: also patch both Firestore collections directly from the client
+  // so the change is persisted even if the server instance is recycled.
+  try {
+    const { doc, setDoc } = await import('firebase/firestore');
+    const { db: firestoreDb } = await import('../lib/firebase');
+    const updatedAt = new Date().toISOString();
+    const patch: any = { status: 'CONFIRMED', scheduledTime: payload.scheduledTime, updatedAt, id };
+    if (payload.adminNotes !== undefined) (patch as any).adminNotes = payload.adminNotes;
+    if (payload.customerEmail) {
+      const norm = extractCustomerEmail({ email: payload.customerEmail });
+      if (norm) {
+        patch.email = norm;
+        patch.customerEmail = norm;
+      }
+    }
+    await Promise.allSettled([
+      setDoc(doc(firestoreDb, 'requests', id), patch, { merge: true }),
+      setDoc(doc(firestoreDb, 'serviceRequests', id), patch, { merge: true })
+    ]);
+  } catch (_) {
+    // Non-fatal: the server already persisted the change
+  }
+
   return {
-    ...result,
-    emailDelivery: backendResult?.emailDelivery,
-    message: backendResult?.message
+    success: true,
+    booking: backendResult.booking || { id, status: 'CONFIRMED', scheduledTime: payload.scheduledTime } as ServiceRequest,
+    emailDelivery: backendResult.emailDelivery,
+    message: backendResult.message
   };
 }
+
 
 export async function sendManualBookingConfirmationEmail(
   id: string,
@@ -988,7 +1104,7 @@ export async function contactBookingCustomer(
 
 export async function confirmInquiryAppointment(
   id: string,
-  payload: { scheduledTime: string; adminNotes?: string; sendEmail?: boolean }
+  payload: { scheduledTime: string; adminNotes?: string; sendEmail?: boolean; customerEmail?: string }
 ): Promise<{ success: boolean; inquiry: any; booking?: any; emailDelivery?: any; message?: string }> {
   const token = getCachedAdminToken();
   let backendResult: any = null;
@@ -1004,7 +1120,15 @@ export async function confirmInquiryAppointment(
   } catch (err) {}
 
   try {
-    await setDoc(doc(db, 'inquiries', id), { status: 'CONVERTED', scheduledTime: payload.scheduledTime, updatedAt: new Date().toISOString() }, { merge: true });
+    const patch: any = { status: 'CONVERTED', scheduledTime: payload.scheduledTime, updatedAt: new Date().toISOString() };
+    if (payload.customerEmail) {
+      const norm = extractCustomerEmail({ email: payload.customerEmail });
+      if (norm) {
+        patch.email = norm;
+        patch.customerEmail = norm;
+      }
+    }
+    await setDoc(doc(db, 'inquiries', id), patch, { merge: true });
   } catch (e) {}
 
   return { 

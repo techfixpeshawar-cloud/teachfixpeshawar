@@ -1,4 +1,4 @@
-import { formatPKTDateTime } from './dateTime';
+import { formatPKTDateTime } from './dateTime.ts';
 
 /**
  * Formats WhatsApp URL with international phone and pre-filled message.
@@ -76,6 +76,8 @@ export function generateInquiryWhatsAppMessage(inquiry: {
   const area = inquiry.area || 'Peshawar';
   const problem = inquiry.message || 'General service inquiry';
   const submittedTime = inquiry.createdAt ? formatPKTDateTime(inquiry.createdAt) : formatPKTDateTime(new Date());
+  const device = inquiry.deviceType ? `${inquiry.deviceType}${inquiry.computerBrandModel ? ` (${inquiry.computerBrandModel})` : ''}` : '';
+  const schedule = inquiry.preferredDate ? `${inquiry.preferredDate}${inquiry.preferredTime ? ` (${inquiry.preferredTime})` : ''}` : '';
 
   return `Assalam-o-Alaikum ${customerName}!
 You submitted an inquiry on our website (TechFix Peshawar).
@@ -86,7 +88,7 @@ You submitted an inquiry on our website (TechFix Peshawar).
 *Client Name:* ${customerName}
 *Email:* ${email}
 *Phone / WhatsApp:* ${phone}
-*Budget / Quote:* ${budget}
+${device ? `*Device & Model:* ${device}\n` : ''}${schedule ? `*Preferred Schedule:* ${schedule}\n` : ''}*Budget / Quote:* ${budget}
 *Location / Area:* ${area}
 *Submitted Time:* ${submittedTime} (PKT, UTC+5)
 
@@ -172,7 +174,7 @@ Your scheduled appointment is confirmed! Our technician will arrive at:
 *DIAGNOSED PROBLEM / JOB NOTES:*
 ${jobNotes}
 ----------------------------------------
-📞 Call / WhatsApp: 0344 0940443
+📞 Call / WhatsApp: +92 327 5226107
 TechFix Peshawar • Doorstep Computer Repair & Troubleshooting`;
 }
 

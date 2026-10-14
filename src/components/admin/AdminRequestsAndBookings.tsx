@@ -37,6 +37,7 @@ import {
   generateConfirmationWhatsAppMessage 
 } from '../../utils/whatsapp';
 import { formatPKTDateTime, formatPKTTime } from '../../utils/dateTime';
+import { extractCustomerEmail } from '../../utils/emailNormalization';
 
 interface AdminRequestsAndBookingsProps {
   bookings: ServiceRequest[];
@@ -113,7 +114,7 @@ export function AdminRequestsAndBookings({
       setScheduledTimeInput(defaultSlot);
       setConfirmSlotInput(defaultSlot);
       setTechnicianNoteInput(`Our technician has received your service request for ${selectedBooking.serviceRequired} (${selectedBooking.deviceType}) and is reaching out to coordinate the visit.`);
-      setCustomerEmailInput(selectedBooking.email || '');
+      setCustomerEmailInput(extractCustomerEmail(selectedBooking));
       setActionNotice(null);
     }
   }, [selectedBooking]);
@@ -123,11 +124,11 @@ export function AdminRequestsAndBookings({
 
   const handleSendConfirmationEmailManual = async () => {
     if (!selectedBooking || isSendingEmail) return;
-    const targetEmail = customerEmailInput.trim() || selectedBooking.email;
+    const targetEmail = customerEmailInput.trim() || extractCustomerEmail(selectedBooking);
     if (!targetEmail || !targetEmail.includes('@')) {
       setActionNotice({
         type: 'error',
-        message: 'Please enter a valid customer email address before dispatching.'
+        message: 'Enter a customer email address to send the confirmation email. If the customer has no email, use "Confirm & Ready WhatsApp" instead.'
       });
       return;
     }
@@ -176,19 +177,22 @@ export function AdminRequestsAndBookings({
     setActionNotice(null);
 
     const slotToConfirm = confirmSlotInput.trim() || scheduledTimeInput.trim() || `${(selectedBooking as any).preferredDate || 'Tomorrow'} (${selectedBooking.preferredTime || 'Morning'})`;
+    const emailToUse = customerEmailInput.trim() ? extractCustomerEmail({ email: customerEmailInput.trim() }) : extractCustomerEmail(selectedBooking);
 
     try {
       const res = await confirmBookingAppointment(selectedBooking.id, {
         scheduledTime: slotToConfirm,
         adminNotes: adminNotes.trim() || undefined,
-        sendEmail: false
+        sendEmail: false,
+        customerEmail: emailToUse || undefined
       });
 
       const updated = {
         ...selectedBooking,
         status: 'CONFIRMED' as const,
         scheduledTime: slotToConfirm,
-        adminNotes: adminNotes.trim() || selectedBooking.adminNotes
+        adminNotes: adminNotes.trim() || selectedBooking.adminNotes,
+        ...(emailToUse ? { email: emailToUse, customerEmail: emailToUse } : {})
       };
       setSelectedBooking(updated);
       setEditingStatus('CONFIRMED');
@@ -199,13 +203,21 @@ export function AdminRequestsAndBookings({
         slotToConfirm,
         adminNotes.trim() || undefined
       );
-      const waLink = getWhatsAppLink(selectedBooking.phone || selectedBooking.whatsapp || '', waMessage);
+      const rawPhone = selectedBooking.phone || selectedBooking.whatsapp || '';
+      const waLink = rawPhone ? getWhatsAppLink(rawPhone, waMessage) : '';
+
+      // Attempt to open WhatsApp window, keeping the prominent button visible for popup-blocker resilience
+      if (waLink) {
+        try {
+          window.open(waLink, '_blank', 'noopener,noreferrer');
+        } catch (_) {}
+      }
 
       setActionNotice({
         type: 'success',
-        message: res.message || `Appointment confirmed (Schedule: ${slotToConfirm}). Ready to dispatch via WhatsApp or manual email.`,
-        waLink,
-        waLabel: 'Send Confirmation on WhatsApp'
+        message: res.message || `Appointment confirmed (Schedule: ${slotToConfirm}). Click below if WhatsApp did not open automatically.`,
+        waLink: waLink || undefined,
+        waLabel: waLink ? 'Open WhatsApp with Customer' : undefined
       });
 
       setIsConfirmOpen(false);
@@ -311,16 +323,21 @@ export function AdminRequestsAndBookings({
     if (!selectedBooking) return;
     setSavingItem(true);
     try {
-      await updateBooking(selectedBooking.id, {
+      const emailUpdate = customerEmailInput.trim() ? extractCustomerEmail({ email: customerEmailInput.trim() }) : undefined;
+      const updates: any = {
         status: editingStatus,
         adminNotes,
         scheduledTime: scheduledTimeInput
-      });
+      };
+      if (emailUpdate) {
+        updates.email = emailUpdate;
+        updates.customerEmail = emailUpdate;
+      }
+
+      await updateBooking(selectedBooking.id, updates);
       setSelectedBooking({
         ...selectedBooking,
-        status: editingStatus,
-        adminNotes,
-        scheduledTime: scheduledTimeInput
+        ...updates
       });
       onRefresh();
     } catch (err) {
@@ -546,7 +563,9 @@ export function AdminRequestsAndBookings({
                   <div className="flex items-start justify-between gap-2">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-white text-sm">{item.fullName}</span>
+                        <span className="font-bold text-white text-sm">
+                          {item.fullName?.trim() || (item as any).name?.trim() || 'Customer'}
+                        </span>
                         {item.urgency === 'Urgent' && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">
                             URGENT
@@ -559,17 +578,29 @@ export function AdminRequestsAndBookings({
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2 text-xs text-slate-400">
+                      <div className="flex items-center gap-2 text-xs text-slate-400 flex-wrap">
                         <span className="text-slate-300 flex items-center gap-1">
                           <MapPin className="h-3 w-3 text-blue-400" />
-                          {item.area}
+                          {item.area?.trim() || 'Peshawar'}
                         </span>
                         <span>•</span>
-                        <span className="text-slate-400">{item.phone}</span>
+                        <span className="text-slate-400">{item.phone?.trim() || item.whatsapp?.trim() || 'No phone'}</span>
+                        {(() => {
+                          const itemEmail = extractCustomerEmail(item);
+                          return itemEmail ? (
+                            <>
+                              <span>•</span>
+                              <span className="text-blue-300 flex items-center gap-1 font-mono text-[11px] truncate max-w-[190px]" title={itemEmail}>
+                                <Mail className="h-3 w-3 text-blue-400 inline shrink-0" />
+                                {itemEmail}
+                              </span>
+                            </>
+                          ) : null;
+                        })()}
                       </div>
 
                       <p className="text-xs text-slate-300 line-clamp-1 mt-1 font-medium">
-                        {item.serviceRequired} — {item.problemDescription}
+                        {item.serviceRequired?.trim() || 'Service Request'} — {item.problemDescription?.trim() || 'No description provided'}
                       </p>
                     </div>
 
@@ -654,20 +685,28 @@ export function AdminRequestsAndBookings({
               <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-4">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-bold text-white">{selectedBooking.fullName}</h3>
+                    <h3 className="text-lg font-bold text-white">{selectedBooking.fullName || 'Customer'}</h3>
                     <span className="text-xs font-mono text-slate-500">#{selectedBooking.id.slice(-6)}</span>
                   </div>
                   <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
                     <MapPin className="h-3.5 w-3.5 text-blue-400" />
-                    <span>{selectedBooking.area} {selectedBooking.fullAddress ? `— ${selectedBooking.fullAddress}` : ''}</span>
+                    <span>{selectedBooking.area || 'Peshawar'} {selectedBooking.fullAddress ? `— ${selectedBooking.fullAddress}` : ''}</span>
                   </div>
-                  {selectedBooking.email && (
-                    <div className="text-xs text-blue-400 flex items-center gap-1.5 mt-1 font-mono">
-                      <Mail className="h-3.5 w-3.5 shrink-0" />
-                      <span>{selectedBooking.email}</span>
-                      <span className="text-[10px] text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">Confirmation Sent</span>
-                    </div>
-                  )}
+                  {(() => {
+                    const clientEmail = extractCustomerEmail(selectedBooking);
+                    return clientEmail ? (
+                      <div className="text-xs text-blue-400 flex items-center gap-1.5 mt-1 font-mono">
+                        <Mail className="h-3.5 w-3.5 shrink-0" />
+                        <span className="font-semibold">{clientEmail}</span>
+                        <span className="text-[10px] text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">Registered</span>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-slate-500 flex items-center gap-1.5 mt-1 font-mono">
+                        <Mail className="h-3.5 w-3.5 shrink-0" />
+                        <span>Email: Not provided</span>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -681,7 +720,7 @@ export function AdminRequestsAndBookings({
                             fullName: selectedBooking.fullName,
                             phone: selectedBooking.phone,
                             whatsapp: selectedBooking.whatsapp,
-                            email: selectedBooking.email,
+                            email: extractCustomerEmail(selectedBooking) || selectedBooking.email,
                             subject: selectedBooking.serviceRequired,
                             service: selectedBooking.serviceRequired,
                             area: selectedBooking.area,
@@ -774,23 +813,30 @@ export function AdminRequestsAndBookings({
                     <div className="flex-1 leading-relaxed font-medium">
                       {actionNotice.message}
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => setActionNotice(null)}
+                      className="text-slate-500 hover:text-slate-300 text-[10px] shrink-0 cursor-pointer"
+                      title="Dismiss"
+                    >✕</button>
                   </div>
 
-                  <div className="pt-2 border-t border-emerald-500/30 flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[11px] text-emerald-300">Customer Communication:</span>
+                  <div className={`pt-2 flex flex-wrap items-center justify-between gap-2 border-t ${
+                    actionNotice.type === 'success' ? 'border-emerald-500/30' : 'border-red-500/30'
+                  }`}>
+                    <span className={`text-[11px] ${actionNotice.type === 'success' ? 'text-emerald-300' : 'text-red-300'}`}>Customer Communication:</span>
                     <div className="flex items-center gap-2">
-                      {selectedBooking.email && (
-                        <button
-                          type="button"
-                          onClick={handleSendConfirmationEmailManual}
-                          disabled={isSendingEmail}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow transition-all cursor-pointer disabled:opacity-50"
-                          title="Send confirmation email manually to customer"
-                        >
-                          <Mail className="h-3.5 w-3.5" />
-                          <span>{isSendingEmail ? 'Sending...' : 'Send Confirmation Email'}</span>
-                        </button>
-                      )}
+                      {/* Show Send Email button always — admin can type email in the confirm panel */}
+                      <button
+                        type="button"
+                        onClick={handleSendConfirmationEmailManual}
+                        disabled={isSendingEmail}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow transition-all cursor-pointer disabled:opacity-50"
+                        title={selectedBooking.email || customerEmailInput.trim() ? 'Send confirmation email to customer' : 'Open the confirmation panel and enter a customer email first'}
+                      >
+                        <Mail className="h-3.5 w-3.5" />
+                        <span>{isSendingEmail ? 'Sending...' : 'Send Confirmation Email'}</span>
+                      </button>
                       {actionNotice.waLink && (
                         <a
                           href={actionNotice.waLink}
@@ -817,7 +863,7 @@ export function AdminRequestsAndBookings({
                     </span>
                   </div>
                   <span className="text-[11px] font-mono text-slate-400">
-                    Target: {selectedBooking.email || 'Email required'}
+                    {extractCustomerEmail(selectedBooking) ? `Email: ${extractCustomerEmail(selectedBooking)}` : 'Email: optional — WhatsApp available'}
                   </span>
                 </div>
 
@@ -887,7 +933,7 @@ export function AdminRequestsAndBookings({
 
                     <div>
                       <label className="block text-[11px] font-medium text-slate-300 mb-1 flex items-center justify-between">
-                        <span>Target Customer Email:</span>
+                        <span>Target Customer Email: <span className="text-slate-500 font-normal">(optional — required only for email confirmation)</span></span>
                         {customerEmailInput.toLowerCase().includes('gmil.com') && (
                           <span className="text-[10px] text-amber-400 font-bold animate-pulse">
                             ⚠️ Domain Typo (@gmil.com) — Click to fix to @gmail.com
@@ -919,7 +965,10 @@ export function AdminRequestsAndBookings({
                     </div>
 
                     <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/20 text-[11px] text-emerald-200/90 leading-relaxed space-y-1">
-                      <div><strong>Channel Control:</strong> Confirm appointment and dispatch via <strong>WhatsApp</strong> or <strong>Manual Email</strong>.</div>
+                      <div><strong>Channel Control:</strong> Use <strong>Confirm &amp; Ready WhatsApp</strong> (no email needed) or enter a customer email below to also <strong>Send Confirmation Email</strong>.</div>
+                      {!extractCustomerEmail(selectedBooking) && !customerEmailInput.trim() && (
+                        <div className="text-slate-400 text-[10px]">💡 No email on file — <em>Confirm &amp; Ready WhatsApp</em> will proceed without sending an email.</div>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
@@ -1063,29 +1112,29 @@ export function AdminRequestsAndBookings({
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <span className="text-slate-500 block text-[10px] uppercase font-mono">Device Type</span>
-                    <span className="text-slate-200 font-semibold">{selectedBooking.deviceType}</span>
+                    <span className="text-slate-200 font-semibold">{selectedBooking.deviceType || 'Computer'}</span>
                   </div>
                   <div>
                     <span className="text-slate-500 block text-[10px] uppercase font-mono">Brand / Model</span>
-                    <span className="text-slate-200 font-semibold">{selectedBooking.computerBrandModel || 'Not Specified'}</span>
+                    <span className="text-slate-200 font-semibold">{selectedBooking.computerBrandModel?.trim() || 'Not Specified'}</span>
                   </div>
                 </div>
 
                 <div>
                   <span className="text-slate-500 block text-[10px] uppercase font-mono">Requested Service</span>
-                  <span className="text-blue-300 font-semibold">{selectedBooking.serviceRequired}</span>
+                  <span className="text-blue-300 font-semibold">{selectedBooking.serviceRequired || 'General Diagnostic'}</span>
                 </div>
 
                 <div>
                   <span className="text-slate-500 block text-[10px] uppercase font-mono">Customer Problem Description</span>
                   <p className="text-slate-300 mt-1 leading-relaxed bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
-                    "{selectedBooking.problemDescription}"
+                    "{selectedBooking.problemDescription?.trim() || 'No description provided'}"
                   </p>
                 </div>
 
                 <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400 font-mono">
                   <span>Submitted: {formatPKTDateTime(selectedBooking.createdAt)} (PKT)</span>
-                  <span>Slot: {selectedBooking.preferredTime}</span>
+                  <span>Slot: {selectedBooking.preferredDate ? `${selectedBooking.preferredDate} (${selectedBooking.preferredTime || 'Standard Slot'})` : (selectedBooking.preferredTime || 'Standard Slot')}</span>
                 </div>
               </div>
 

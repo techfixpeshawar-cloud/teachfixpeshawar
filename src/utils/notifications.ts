@@ -1,5 +1,6 @@
 import { ServiceRequest } from '../types';
 import { formatPKTDateTime } from './dateTime';
+import { extractCustomerEmail } from './emailNormalization';
 
 export interface EmailNotificationPayload {
   to_email: string;
@@ -40,10 +41,12 @@ export async function sendServiceNotificationEmail(
     `Hello ${request.fullName || 'Customer'}, this is Safiullah from TechFix On-Site Computer Support in Peshawar regarding your request for ${request.serviceRequired || 'computer service'}.`
   )}`;
 
+  const customerEmail = extractCustomerEmail(request);
+
   const emailPayload: EmailNotificationPayload = {
     to_email: TARGET_EMAIL,
     customer_name: request.fullName || 'Anonymous Customer',
-    customer_email: request.email || 'Not provided',
+    customer_email: customerEmail || 'Not provided',
     customer_phone: request.phone || 'Not provided',
     customer_whatsapp: request.whatsapp || request.phone || 'Not provided',
     area: request.area || 'Peshawar',
@@ -91,6 +94,38 @@ QUICK ACTIONS:
 ---------------------------------------------------------
 `;
 
+  const emailHtml = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b;">
+      <div style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center;">
+        <h1 style="margin: 0; font-size: 20px; color: #ffffff;">NEW ON-SITE SERVICE REQUEST</h1>
+        <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
+      </div>
+      <div style="padding: 24px;">
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
+          <tr><td style="padding: 8px 0; color: #94a3b8; width: 140px;">Customer:</td><td style="padding: 8px 0; font-weight: bold; color: #f8fafc;">${emailPayload.customer_name}</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Email:</td><td style="padding: 8px 0; color: #38bdf8;">${emailPayload.customer_email}</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Primary Phone:</td><td style="padding: 8px 0;"><a href="tel:${emailPayload.customer_phone}" style="color: #38bdf8; text-decoration: none;">${emailPayload.customer_phone}</a></td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">WhatsApp:</td><td style="padding: 8px 0;"><a href="${emailPayload.whatsapp_reply_link}" style="color: #34d399; text-decoration: none;">${emailPayload.customer_whatsapp}</a></td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Location / Area:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.area} (Peshawar)</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Service Required:</td><td style="padding: 8px 0; font-weight: bold; color: #fbbf24;">${emailPayload.service_required}</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Device / Model:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.device_type} — ${emailPayload.computer_model}</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Preferred Schedule:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.preferred_date} (${emailPayload.preferred_time})</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Urgency:</td><td style="padding: 8px 0; font-weight: bold; color: ${emailPayload.urgency === 'Urgent' ? '#f87171' : '#f8fafc'};">${emailPayload.urgency.toUpperCase()}</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Contains Important Data:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.contains_important_data}</td></tr>
+          <tr><td style="padding: 8px 0; color: #94a3b8;">Submitted Time:</td><td style="padding: 8px 0; color: #cbd5e1;">${emailPayload.timestamp}</td></tr>
+        </table>
+        <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+          <p style="margin: 0 0 6px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
+          <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${emailPayload.problem_description}</p>
+        </div>
+        <div style="text-align: center;">
+          <a href="${emailPayload.whatsapp_reply_link}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin-right: 10px;">Reply on WhatsApp</a>
+          <a href="tel:${emailPayload.customer_phone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px;">Call Customer</a>
+        </div>
+      </div>
+    </div>
+  `;
+
   try {
     // 1. Dispatch through server backend trigger
     const serverRes = await fetch('/api/notify-email', {
@@ -100,6 +135,7 @@ QUICK ACTIONS:
         recipient: TARGET_EMAIL,
         subject: `[${emailPayload.urgency.toUpperCase()}] New On-Site PC Request: ${emailPayload.customer_name} (${emailPayload.area})`,
         bodyText: emailBodyText,
+        html: emailHtml,
         payload: emailPayload
       })
     });

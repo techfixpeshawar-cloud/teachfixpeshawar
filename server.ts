@@ -9,9 +9,8 @@ import fs from 'fs';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
-// Removed static Vite import to prevent rollup-linux-x64-gnu runtime collisions on Vercel
-import { initializeApp as initFirebaseClientApp, getApps as getFirebaseApps } from 'firebase/app';
-import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
+// Official Firebase Admin SDK singleton for persistent, high-performance Vercel serverless durability
+import { getAdminFirestore } from './server/firebaseAdmin.ts';
 
 const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -60,9 +59,9 @@ const DB_FILE = IS_VERCEL
   : path.join(process.cwd(), 'data', 'database.json');
 
 // ─────────────────────────────────────────────────────────────────
-// Firebase Firestore — Persistent Settings Storage (Vercel-safe)
-// Stores admin settings in Firestore so they survive serverless restarts.
-// Falls back gracefully if Firestore is unavailable.
+// Firebase Firestore — Official Server Admin SDK Singleton (Vercel-safe)
+// Uses Google Cloud gRPC/HTTP with Service Account credentials.
+// Completely eliminates the 10-second client timeout and offline fallback.
 // ─────────────────────────────────────────────────────────────────
 const FIREBASE_CLIENT_CONFIG = {
   apiKey:            process.env.FIREBASE_API_KEY            || process.env.VITE_FIREBASE_API_KEY            || "AIzaSyDrK5NsyiIg5x9HirLOiqm-Wh8hcMo3dm0",
@@ -72,19 +71,12 @@ const FIREBASE_CLIENT_CONFIG = {
   messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || process.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "778965098215",
   appId:             process.env.FIREBASE_APP_ID             || process.env.VITE_FIREBASE_APP_ID             || "1:778965098215:web:c04cccc0542d11eea34c42",
 };
-const FIRESTORE_DATABASE_ID = (process.env.FIREBASE_DATABASE_ID || process.env.VITE_FIREBASE_DATABASE_ID || "").trim();
 
-let _firestoreDb: any = null;
 function getFirestoreInstance() {
-  if (_firestoreDb) return _firestoreDb;
   try {
-    const existingApps = getFirebaseApps();
-    const fbApp = existingApps.find((a: any) => a.name === 'techfix-server')
-      || initFirebaseClientApp(FIREBASE_CLIENT_CONFIG, 'techfix-server');
-    _firestoreDb = FIRESTORE_DATABASE_ID ? getFirestore(fbApp, FIRESTORE_DATABASE_ID) : getFirestore(fbApp);
-    return _firestoreDb;
+    return getAdminFirestore();
   } catch (err) {
-    console.error('[FIRESTORE] Init failed:', err);
+    console.error('[FIRESTORE] Admin Firestore init failed:', err);
     return null;
   }
 }
@@ -186,14 +178,16 @@ async function saveSettingsToFirestore(settings: any): Promise<void> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb) return;
-    const ref = doc(fsDb, 'settings', 'admin');
-    // Strip internal/non-serializable keys before saving
     const clean: any = {};
     for (const [k, v] of Object.entries(settings)) {
       if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
     }
-    await setDoc(ref, { ...clean, _updatedAt: new Date().toISOString() }, { merge: true });
-    console.log('[FIRESTORE] ✅ Settings saved to Firestore');
+    const cleanWithMeta = { ...clean, _updatedAt: new Date().toISOString() };
+    await Promise.all([
+      fsDb.collection('settings').doc('admin').set(cleanWithMeta, { merge: true }),
+      fsDb.collection('settings').doc('site_config').set(cleanWithMeta, { merge: true })
+    ]);
+    console.log('[FIRESTORE] ✅ Settings saved to Firestore (admin & site_config)');
   } catch (err) {
     console.error('[FIRESTORE] ❌ Save failed:', err);
   }
@@ -203,9 +197,11 @@ async function loadSettingsFromFirestore(): Promise<Record<string, any> | null> 
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb) return null;
-    const ref = doc(fsDb, 'settings', 'admin');
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
+    let snap = await fsDb.collection('settings').doc('admin').get();
+    if (!snap.exists) {
+      snap = await fsDb.collection('settings').doc('site_config').get();
+    }
+    if (snap.exists) {
       const data: any = snap.data();
       delete data._updatedAt;
       console.log('[FIRESTORE] ✅ Settings loaded from Firestore');
@@ -221,18 +217,16 @@ async function loadSettingsFromFirestore(): Promise<Record<string, any> | null> 
 
 // ─────────────────────────────────────────────────────────────────
 // Problem Leads — Firestore Persistence
-// Authoritative persistence in Firestore collection 'inquiries' (with type='problem-lead')
 // ─────────────────────────────────────────────────────────────────
 async function saveProblemLeadToFirestore(lead: any): Promise<void> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb || !lead?.id) return;
-    const ref = doc(fsDb, 'inquiries', String(lead.id));
     const clean: any = {};
     for (const [k, v] of Object.entries(lead)) {
       if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
     }
-    await setDoc(ref, {
+    await fsDb.collection('inquiries').doc(String(lead.id)).set({
       ...clean,
       type: 'problem-lead',
       _updatedAt: new Date().toISOString()
@@ -247,8 +241,7 @@ async function deleteProblemLeadFromFirestore(id: string): Promise<void> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb || !id) return;
-    const ref = doc(fsDb, 'inquiries', String(id));
-    await deleteDoc(ref);
+    await fsDb.collection('inquiries').doc(String(id)).delete();
     console.log(`[FIRESTORE] ✅ Problem lead deleted: ${id}`);
   } catch (err) {
     console.error(`[FIRESTORE] ❌ Problem lead delete failed (${id}):`, err);
@@ -259,11 +252,10 @@ async function loadProblemLeadsFromFirestore(): Promise<any[]> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb) return [];
-    const colRef = collection(fsDb, 'inquiries');
-    const snap = await getDocs(colRef);
+    const snap = await fsDb.collection('inquiries').get();
     if (!snap.empty) {
       const items: any[] = [];
-      snap.docs.forEach(d => {
+      snap.docs.forEach((d: any) => {
         const data = d.data();
         if (data.type === 'problem-lead' || d.id.startsWith('LEAD-PRB-')) {
           const item: any = { id: d.id, ...data };
@@ -282,13 +274,11 @@ async function loadProblemLeadsFromFirestore(): Promise<any[]> {
 
 // ─────────────────────────────────────────────────────────────────
 // Problem Solutions — Firestore Persistence
-// Authoritative persistence in Firestore doc 'settings/problem_solutions'
 // ─────────────────────────────────────────────────────────────────
 async function saveProblemSolutionsToFirestore(solutions: any[]): Promise<void> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb || !Array.isArray(solutions)) return;
-    const ref = doc(fsDb, 'settings', 'problem_solutions');
     const cleanList = solutions.map(item => {
       const clean: any = {};
       for (const [k, v] of Object.entries(item)) {
@@ -296,7 +286,7 @@ async function saveProblemSolutionsToFirestore(solutions: any[]): Promise<void> 
       }
       return clean;
     });
-    await setDoc(ref, {
+    await fsDb.collection('settings').doc('problem_solutions').set({
       items: cleanList,
       _updatedAt: new Date().toISOString()
     }, { merge: true });
@@ -310,10 +300,9 @@ async function loadProblemSolutionsFromFirestore(): Promise<any[] | null> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb) return null;
-    const ref = doc(fsDb, 'settings', 'problem_solutions');
-    const snap = await getDoc(ref);
-    if (snap.exists()) {
-      const data = snap.data();
+    const snap = await fsDb.collection('settings').doc('problem_solutions').get();
+    if (snap.exists) {
+      const data: any = snap.data();
       if (Array.isArray(data?.items)) {
         console.log(`[FIRESTORE] ✅ ${data.items.length} Problem solutions loaded from Firestore`);
         return data.items;
@@ -326,8 +315,36 @@ async function loadProblemSolutionsFromFirestore(): Promise<any[] | null> {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Canonical Customer Email Normalization
+// ─────────────────────────────────────────────────────────────────
+function extractCustomerEmail(record: any): string {
+  if (!record || typeof record !== 'object') return '';
+  const candidates = [
+    record.email,
+    record.customerEmail,
+    record.emailAddress,
+    record.customer_email,
+    record.clientEmail,
+    record.contactEmail,
+    record.userEmail
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string') {
+      const trimmed = c.trim();
+      if (trimmed.length >= 5 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+        const lower = trimmed.toLowerCase();
+        const invalidPlaceholders = ['not provided', 'no email', 'none', 'null', 'undefined', 'n/a'];
+        if (!invalidPlaceholders.some(p => lower.includes(p))) {
+          return trimmed;
+        }
+      }
+    }
+  }
+  return '';
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Bookings & Inquiries — Firestore Persistence
-// Ensures bookings and inquiries survive Vercel cold boots and serverless restarts
 // ─────────────────────────────────────────────────────────────────
 async function saveBookingToFirestore(booking: any): Promise<void> {
   try {
@@ -337,16 +354,107 @@ async function saveBookingToFirestore(booking: any): Promise<void> {
     for (const [k, v] of Object.entries(booking)) {
       if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
     }
+
+    // Canonicalize email across legacy fields
+    const normalizedEmail = extractCustomerEmail(clean);
+    if (normalizedEmail) {
+      clean.email = normalizedEmail;
+    } else {
+      // CRITICAL: delete clean.email if empty so merge:true does NOT overwrite an existing email in Firestore!
+      delete clean.email;
+    }
+
     const cleanDoc = { ...clean, _updatedAt: new Date().toISOString() };
     await Promise.all([
-      setDoc(doc(fsDb, 'requests', String(booking.id)), cleanDoc, { merge: true }),
-      setDoc(doc(fsDb, 'bookings', String(booking.id)), cleanDoc, { merge: true }),
-      setDoc(doc(fsDb, 'serviceRequests', String(booking.id)), cleanDoc, { merge: true })
+      fsDb.collection('requests').doc(String(booking.id)).set(cleanDoc, { merge: true }),
+      fsDb.collection('bookings').doc(String(booking.id)).set(cleanDoc, { merge: true }),
+      fsDb.collection('serviceRequests').doc(String(booking.id)).set(cleanDoc, { merge: true })
     ]);
-    console.log(`[FIRESTORE] ✅ Booking saved: ${booking.id}`);
+    console.log(`[FIRESTORE] ✅ Booking saved: ${booking.id} | HasEmail=${Boolean(clean.email)}`);
   } catch (err) {
     console.error(`[FIRESTORE] ❌ Booking save failed (${booking?.id}):`, err);
   }
+}
+
+async function deleteBookingFromFirestore(id: string): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !id) return;
+    await Promise.all([
+      fsDb.collection('requests').doc(String(id)).delete(),
+      fsDb.collection('bookings').doc(String(id)).delete(),
+      fsDb.collection('serviceRequests').doc(String(id)).delete()
+    ]);
+    console.log(`[FIRESTORE] ✅ Booking deleted: ${id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Booking delete failed (${id}):`, err);
+  }
+}
+
+async function loadBookingsFromFirestore(): Promise<any[]> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return [];
+
+    const [reqSnap, inqSnap, custSnap] = await Promise.all([
+      fsDb.collection('requests').get(),
+      fsDb.collection('inquiries').get().catch(() => null),
+      fsDb.collection('customers').get().catch(() => null)
+    ]);
+
+    const inqDocs = inqSnap && !inqSnap.empty ? inqSnap.docs.map((d: any) => d.data()) : [];
+    const custDocs = custSnap && !custSnap.empty ? custSnap.docs.map((d: any) => d.data()) : [];
+
+    if (!reqSnap.empty) {
+      const items: any[] = [];
+      reqSnap.docs.forEach((d: any) => {
+        const data = d.data();
+        let email = extractCustomerEmail(data);
+        let emailSource = email ? 'requests' : 'none';
+
+        // Cross-reference linked inquiry if email not in requests doc
+        if (!email && inqDocs.length > 0) {
+          const phoneKey = (data.phone || data.whatsapp || '').replace(/\D/g, '');
+          const matchingInq = inqDocs.find((i: any) => 
+            i.bookingId === d.id || 
+            (phoneKey.length >= 7 && (i.phone || '').replace(/\D/g, '') === phoneKey)
+          );
+          if (matchingInq) {
+            email = extractCustomerEmail(matchingInq);
+            if (email) emailSource = 'inquiries';
+          }
+        }
+
+        // Cross-reference linked customer profile if still missing
+        if (!email && custDocs.length > 0) {
+          const phoneKey = (data.phone || data.whatsapp || '').replace(/\D/g, '');
+          if (phoneKey.length >= 7) {
+            const matchingCust = custDocs.find((c: any) => 
+              (c.phone || '').replace(/\D/g, '') === phoneKey
+            );
+            if (matchingCust) {
+              email = extractCustomerEmail(matchingCust);
+              if (email) emailSource = 'customers';
+            }
+          }
+        }
+
+        const item: any = { 
+          id: d.id, 
+          ...data,
+          email: email || undefined 
+        };
+        delete item._updatedAt;
+        items.push(item);
+      });
+      items.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      console.log(`[CUSTOMER-EMAIL] loadBookingsFromFirestore: ${items.length} total, ${items.filter((i: any) => i.email).length} with email`);
+      return items;
+    }
+  } catch (err) {
+    console.error('[FIRESTORE] ❌ Bookings load failed:', err);
+  }
+  return [];
 }
 
 async function saveInquiryToFirestore(inquiry: any): Promise<void> {
@@ -357,13 +465,30 @@ async function saveInquiryToFirestore(inquiry: any): Promise<void> {
     for (const [k, v] of Object.entries(inquiry)) {
       if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
     }
-    await setDoc(doc(fsDb, 'inquiries', String(inquiry.id)), {
+    const normalizedEmail = extractCustomerEmail(clean);
+    if (normalizedEmail) {
+      clean.email = normalizedEmail;
+    } else {
+      delete clean.email;
+    }
+    await fsDb.collection('inquiries').doc(String(inquiry.id)).set({
       ...clean,
       _updatedAt: new Date().toISOString()
     }, { merge: true });
-    console.log(`[FIRESTORE] ✅ Inquiry saved: ${inquiry.id}`);
+    console.log(`[FIRESTORE] ✅ Inquiry saved: ${inquiry.id} | HasEmail=${Boolean(clean.email)}`);
   } catch (err) {
     console.error(`[FIRESTORE] ❌ Inquiry save failed (${inquiry?.id}):`, err);
+  }
+}
+
+async function deleteInquiryFromFirestore(id: string): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !id) return;
+    await fsDb.collection('inquiries').doc(String(id)).delete();
+    console.log(`[FIRESTORE] ✅ Inquiry deleted: ${id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Inquiry delete failed (${id}):`, err);
   }
 }
 
@@ -371,14 +496,17 @@ async function loadInquiriesFromFirestore(): Promise<any[]> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb) return [];
-    const colRef = collection(fsDb, 'inquiries');
-    const snap = await getDocs(colRef);
+    const snap = await fsDb.collection('inquiries').get();
     if (!snap.empty) {
       const items: any[] = [];
-      snap.docs.forEach(d => {
+      snap.docs.forEach((d: any) => {
         const data = d.data();
         if (data.type !== 'problem-lead' && !d.id.startsWith('LEAD-PRB-')) {
           const item: any = { id: d.id, ...data };
+          const normalizedEmail = extractCustomerEmail(data);
+          if (normalizedEmail) {
+            item.email = normalizedEmail;
+          }
           delete item._updatedAt;
           items.push(item);
         }
@@ -392,27 +520,252 @@ async function loadInquiriesFromFirestore(): Promise<any[]> {
   return [];
 }
 
-async function loadBookingsFromFirestore(): Promise<any[]> {
+// ─────────────────────────────────────────────────────────────────
+// Services — Firestore Persistence
+// ─────────────────────────────────────────────────────────────────
+async function saveServiceToFirestore(service: any): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !service?.id) return;
+    const clean: any = {};
+    for (const [k, v] of Object.entries(service)) {
+      if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
+    }
+    await fsDb.collection('services').doc(String(service.id)).set({
+      ...clean,
+      _updatedAt: new Date().toISOString()
+    }, { merge: true });
+    console.log(`[FIRESTORE] ✅ Service saved: ${service.id} (${service.title})`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Service save failed (${service?.id}):`, err);
+  }
+}
+
+async function deleteServiceFromFirestore(id: string): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !id) return;
+    await fsDb.collection('services').doc(String(id)).delete();
+    console.log(`[FIRESTORE] ✅ Service deleted: ${id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Service delete failed (${id}):`, err);
+  }
+}
+
+async function loadServicesFromFirestore(): Promise<any[]> {
   try {
     const fsDb = getFirestoreInstance();
     if (!fsDb) return [];
-    const colRef = collection(fsDb, 'requests');
-    const snap = await getDocs(colRef);
+    const snap = await fsDb.collection('services').get();
     if (!snap.empty) {
       const items: any[] = [];
-      snap.docs.forEach(d => {
+      snap.docs.forEach((d: any) => {
         const data = d.data();
         const item: any = { id: d.id, ...data };
         delete item._updatedAt;
         items.push(item);
       });
-      items.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      items.sort((a, b) => (a.order || 99) - (b.order || 99));
       return items;
     }
   } catch (err) {
-    console.error('[FIRESTORE] ❌ Bookings load failed:', err);
+    console.error('[FIRESTORE] ❌ Services load failed:', err);
   }
   return [];
+}
+
+// ─────────────────────────────────────────────────────────────────
+// FAQs — Firestore Persistence
+// ─────────────────────────────────────────────────────────────────
+async function saveFaqToFirestore(faq: any): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !faq?.id) return;
+    const clean: any = {};
+    for (const [k, v] of Object.entries(faq)) {
+      if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
+    }
+    await fsDb.collection('faq').doc(String(faq.id)).set({
+      ...clean,
+      _updatedAt: new Date().toISOString()
+    }, { merge: true });
+    console.log(`[FIRESTORE] ✅ FAQ saved: ${faq.id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ FAQ save failed (${faq?.id}):`, err);
+  }
+}
+
+async function deleteFaqFromFirestore(id: string): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !id) return;
+    await fsDb.collection('faq').doc(String(id)).delete();
+    console.log(`[FIRESTORE] ✅ FAQ deleted: ${id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ FAQ delete failed (${id}):`, err);
+  }
+}
+
+async function loadFaqsFromFirestore(): Promise<any[]> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return [];
+    const snap = await fsDb.collection('faq').get();
+    if (!snap.empty) {
+      const items: any[] = [];
+      snap.docs.forEach((d: any) => {
+        const data = d.data();
+        const item: any = { id: d.id, ...data };
+        delete item._updatedAt;
+        items.push(item);
+      });
+      return items;
+    }
+  } catch (err) {
+    console.error('[FIRESTORE] ❌ FAQs load failed:', err);
+  }
+  return [];
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Case Studies — Firestore Persistence
+// ─────────────────────────────────────────────────────────────────
+async function saveCaseStudyToFirestore(cs: any): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !cs?.id) return;
+    const clean: any = {};
+    for (const [k, v] of Object.entries(cs)) {
+      if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
+    }
+    await fsDb.collection('caseStudies').doc(String(cs.id)).set({
+      ...clean,
+      _updatedAt: new Date().toISOString()
+    }, { merge: true });
+    console.log(`[FIRESTORE] ✅ Case Study saved: ${cs.id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Case Study save failed (${cs?.id}):`, err);
+  }
+}
+
+async function deleteCaseStudyFromFirestore(id: string): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !id) return;
+    await fsDb.collection('caseStudies').doc(String(id)).delete();
+    console.log(`[FIRESTORE] ✅ Case Study deleted: ${id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Case Study delete failed (${id}):`, err);
+  }
+}
+
+async function loadCaseStudiesFromFirestore(): Promise<any[]> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return [];
+    const snap = await fsDb.collection('caseStudies').get();
+    if (!snap.empty) {
+      const items: any[] = [];
+      snap.docs.forEach((d: any) => {
+        const data = d.data();
+        const item: any = { id: d.id, ...data };
+        delete item._updatedAt;
+        items.push(item);
+      });
+      return items;
+    }
+  } catch (err) {
+    console.error('[FIRESTORE] ❌ Case Studies load failed:', err);
+  }
+  return [];
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Customers — Firestore Persistence
+// ─────────────────────────────────────────────────────────────────
+async function saveCustomerToFirestore(cust: any): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !cust?.id) return;
+    const clean: any = {};
+    for (const [k, v] of Object.entries(cust)) {
+      if (typeof v !== 'function' && typeof v !== 'undefined') clean[k] = v;
+    }
+    await fsDb.collection('customers').doc(String(cust.id)).set({
+      ...clean,
+      _updatedAt: new Date().toISOString()
+    }, { merge: true });
+    console.log(`[FIRESTORE] ✅ Customer saved: ${cust.id} (${cust.name})`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Customer save failed (${cust?.id}):`, err);
+  }
+}
+
+async function deleteCustomerFromFirestore(id: string): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !id) return;
+    await fsDb.collection('customers').doc(String(id)).delete();
+    console.log(`[FIRESTORE] ✅ Customer deleted: ${id}`);
+  } catch (err) {
+    console.error(`[FIRESTORE] ❌ Customer delete failed (${id}):`, err);
+  }
+}
+
+async function loadCustomersFromFirestore(): Promise<any[]> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return [];
+    const snap = await fsDb.collection('customers').get();
+    if (!snap.empty) {
+      const items: any[] = [];
+      snap.docs.forEach((d: any) => {
+        const data = d.data();
+        const item: any = { id: d.id, ...data };
+        delete item._updatedAt;
+        items.push(item);
+      });
+      return items;
+    }
+  } catch (err) {
+    console.error('[FIRESTORE] ❌ Customers load failed:', err);
+  }
+  return [];
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Page Sections & CMS — Firestore Persistence
+// ─────────────────────────────────────────────────────────────────
+async function savePageSectionsToFirestore(pageSections: any): Promise<void> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb || !pageSections) return;
+    await fsDb.collection('settings').doc('page_sections').set({
+      sections: pageSections,
+      _updatedAt: new Date().toISOString()
+    }, { merge: true });
+    console.log('[FIRESTORE] ✅ Page sections saved to Firestore');
+  } catch (err) {
+    console.error('[FIRESTORE] ❌ Page sections save failed:', err);
+  }
+}
+
+async function loadPageSectionsFromFirestore(): Promise<any | null> {
+  try {
+    const fsDb = getFirestoreInstance();
+    if (!fsDb) return null;
+    const snap = await fsDb.collection('settings').doc('page_sections').get();
+    if (snap.exists) {
+      const data: any = snap.data();
+      if (data?.sections) {
+        console.log('[FIRESTORE] ✅ Page sections loaded from Firestore');
+        return data.sections;
+      }
+    }
+  } catch (err) {
+    console.error('[FIRESTORE] ❌ Page sections load failed:', err);
+  }
+  return null;
 }
 
 // --- SECURITY HARDENING MIDDLEWARE ---
@@ -2392,6 +2745,41 @@ const firestoreReady: Promise<void> = new Promise(resolve => { _firestoreReadyRe
       db.bookings = firestoreBookings;
       console.log(`[FIRESTORE] ✅ db.bookings overlaid (${firestoreBookings.length} items) from Firestore on startup`);
     }
+
+    // Services overlay
+    const firestoreServices = await loadServicesFromFirestore();
+    if (Array.isArray(firestoreServices) && firestoreServices.length > 0) {
+      db.services = firestoreServices;
+      console.log(`[FIRESTORE] ✅ db.services overlaid (${firestoreServices.length} items) from Firestore on startup`);
+    }
+
+    // FAQs overlay
+    const firestoreFaqs = await loadFaqsFromFirestore();
+    if (Array.isArray(firestoreFaqs) && firestoreFaqs.length > 0) {
+      db.faqs = firestoreFaqs;
+      console.log(`[FIRESTORE] ✅ db.faqs overlaid (${firestoreFaqs.length} items) from Firestore on startup`);
+    }
+
+    // Case Studies overlay
+    const firestoreCaseStudies = await loadCaseStudiesFromFirestore();
+    if (Array.isArray(firestoreCaseStudies) && firestoreCaseStudies.length > 0) {
+      db.caseStudies = firestoreCaseStudies;
+      console.log(`[FIRESTORE] ✅ db.caseStudies overlaid (${firestoreCaseStudies.length} items) from Firestore on startup`);
+    }
+
+    // Customers overlay
+    const firestoreCustomers = await loadCustomersFromFirestore();
+    if (Array.isArray(firestoreCustomers) && firestoreCustomers.length > 0) {
+      db.customers = firestoreCustomers;
+      console.log(`[FIRESTORE] ✅ db.customers overlaid (${firestoreCustomers.length} items) from Firestore on startup`);
+    }
+
+    // Page Sections overlay
+    const firestoreSections = await loadPageSectionsFromFirestore();
+    if (firestoreSections && typeof firestoreSections === 'object') {
+      db.pageSections = { ...db.pageSections, ...firestoreSections };
+      console.log('[FIRESTORE] ✅ db.pageSections overlaid from Firestore on startup');
+    }
   } catch (err) {
     console.error('[FIRESTORE] Startup overlay error:', err);
   } finally {
@@ -2407,6 +2795,13 @@ app.get('/uploads/:filename', (req, res, next) => {
   if (fs.existsSync(filePath)) {
     res.setHeader('Cache-Control', 'public, max-age=86400');
     return res.sendFile(filePath);
+  }
+
+  // Check public/uploads
+  const publicPath = path.join(process.cwd(), 'public', 'uploads', filename);
+  if (fs.existsSync(publicPath)) {
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.sendFile(publicPath);
   }
 
   // Auto-recovery: Check if image exists in db.media or db.settings
@@ -2429,6 +2824,16 @@ app.get('/uploads/:filename', (req, res, next) => {
       res.setHeader('Content-Type', mime);
       res.setHeader('Cache-Control', 'public, max-age=86400');
       return res.send(buf);
+    }
+  }
+
+  // Fallback for technician portrait to prevent 404
+  if (filename.startsWith('technician-portrait-')) {
+    const fallbackPortrait = path.join(process.cwd(), 'public', 'uploads', 'technician-portrait-1789213477063.jpg');
+    if (fs.existsSync(fallbackPortrait)) {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.sendFile(fallbackPortrait);
     }
   }
 
@@ -2485,23 +2890,23 @@ function validatePakistaniPhone(rawPhone: any): { valid: boolean; normalized?: s
   if (/[a-zA-Z]/.test(str)) {
     return { valid: false, error: 'Phone number cannot contain letters.' };
   }
-  const digits = str.replace(/[^0-9+]/g, '');
+  const digits = str.replace(/[^0-9]/g, '');
   let normalized = '';
-  if (digits.startsWith('+923') && digits.length === 13) {
-    normalized = digits;
-  } else if (digits.startsWith('923') && digits.length === 12) {
+  if (digits.startsWith('0092')) {
+    normalized = '+92' + digits.slice(4);
+  } else if (digits.startsWith('92')) {
     normalized = '+' + digits;
-  } else if (digits.startsWith('03') && digits.length === 11) {
-    normalized = '+92' + digits.slice(1);
+  } else if (digits.startsWith('0')) {
+    normalized = '+92' + digits.replace(/^0+/, '');
   } else if (digits.startsWith('3') && digits.length === 10) {
-    normalized = '+923' + digits.slice(1);
+    normalized = '+92' + digits;
+  } else if (digits.length >= 10 && digits.length <= 13) {
+    normalized = '+' + digits;
   } else {
-    return { valid: false, error: 'Please provide a valid Pakistani mobile number (e.g. 03275526107 or +923275526107).' };
+    return { valid: false, error: 'Please provide a valid Pakistani mobile number (e.g. 034409404427 or +9234409404427).' };
   }
-
-  const subscriber = normalized.slice(4);
-  if (/^(\d)\1{7,}$/.test(subscriber)) {
-    return { valid: false, error: 'Please enter a genuine, reachable contact number.' };
+  if (normalized.length < 11 || normalized.length > 15) {
+    return { valid: false, error: 'Please provide a valid Pakistani mobile number (e.g. 034409404427 or +9234409404427).' };
   }
   return { valid: true, normalized };
 }
@@ -2517,11 +2922,6 @@ function validateCustomerName(name: any): { valid: boolean; clean?: string; erro
   if (clean.length > 100) {
     return { valid: false, error: 'Name must not exceed 100 characters.' };
   }
-  const lower = clean.toLowerCase();
-  const placeholders = ['test', 'testing', 'no', 'none', 'asdf', 'xyz', 'na', 'n/a', 'user'];
-  if (placeholders.includes(lower)) {
-    return { valid: false, error: 'Please enter your actual full name.' };
-  }
   return { valid: true, clean };
 }
 
@@ -2530,16 +2930,11 @@ function validateProblemDescription(desc: any): { valid: boolean; clean?: string
     return { valid: false, error: 'Problem description is required.' };
   }
   const clean = desc.trim();
-  if (clean.length < 5) {
-    return { valid: false, error: 'Please describe your computer problem in a few words (at least 5 characters).' };
+  if (clean.length < 3) {
+    return { valid: false, error: 'Please describe your computer problem in a few words.' };
   }
   if (clean.length > 2000) {
     return { valid: false, error: 'Description must not exceed 2000 characters.' };
-  }
-  const lower = clean.toLowerCase();
-  const placeholders = ['test', 'no', 'none', 'asdf', 'nothing', 'problem', 'fix'];
-  if (placeholders.includes(lower) || /^([a-zA-Z0-9])\1{4,}$/.test(lower)) {
-    return { valid: false, error: 'Please provide a meaningful description of the issue.' };
   }
   return { valid: true, clean };
 }
@@ -2577,17 +2972,12 @@ app.post('/api/bookings', publicApiRateLimiter, async (req, res) => {
     return res.status(400).json({ error: descVal.error });
   }
 
-  if (!email || !String(email).trim()) {
-    return res.status(400).json({ error: "Please provide an Email Address for confirmation." });
+  const cleanEmail = extractCustomerEmail(req.body);
+  if (!cleanEmail) {
+    return res.status(400).json({ error: "Please provide a valid Email Address for confirmation." });
   }
 
-  const cleanEmail = String(email).trim();
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(cleanEmail)) {
-    return res.status(400).json({ error: "Please provide a valid Email Address for instant confirmation." });
-  }
-
-  // Idempotency: prevent rapid duplicate submission within 2 minutes
+  // Idempotency: prevent rapid duplicate submission within 2 minutes or duplicate ID
   const now = Date.now();
   const recentDuplicate = (db.bookings || []).find((b: any) => {
     const age = now - new Date(b.createdAt || 0).getTime();
@@ -2605,11 +2995,34 @@ app.post('/api/bookings', publicApiRateLimiter, async (req, res) => {
     });
   }
 
+  const fsDb = getFirestoreInstance();
+  if (fsDb && req.body.id) {
+    try {
+      const existingDoc = await fsDb.collection('requests').doc(String(req.body.id).trim()).get();
+      if (existingDoc.exists) {
+        const existingData = existingDoc.data();
+        return res.json({
+          success: true,
+          bookingId: existingData?.id || req.body.id,
+          booking: existingData,
+          message: "Your request is already received and queued for dispatch.",
+          isDuplicate: true
+        });
+      }
+    } catch (e) {
+      console.warn('[FIRESTORE] Idempotency check failed:', e);
+    }
+  }
+
   const cleanWhatsapp = whatsapp ? (validatePakistaniPhone(whatsapp).normalized || String(whatsapp).trim()) : phoneVal.normalized;
 
+  const canonicalId = (req.body.id && String(req.body.id).trim()) || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`;
+
+  console.log(`[CUSTOMER-EMAIL] Submission received: ID=${canonicalId} | Email=${cleanEmail} | Length=${cleanEmail.length}`);
+
   const newBooking = {
-    id: `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
-    createdAt: new Date().toISOString(),
+    id: canonicalId,
+    createdAt: req.body.createdAt || new Date().toISOString(),
     fullName: nameVal.clean!,
     email: cleanEmail,
     phone: phoneVal.normalized!,
@@ -2629,7 +3042,7 @@ app.post('/api/bookings', publicApiRateLimiter, async (req, res) => {
 
   // 1. Insert into Leads (Inquiries) first as required
   const newLead = {
-    id: `INQ-${newBooking.id.replace(/^PSH-/, '')}`,
+    id: `INQ-${newBooking.id.replace(/^(PSH-|REQ-)/, '')}`,
     bookingId: newBooking.id,
     fullName: newBooking.fullName,
     name: newBooking.fullName,
@@ -2934,9 +3347,18 @@ Our technician (Safiullah) will contact you at ${newBooking.phone} shortly to co
 Helpline / WhatsApp: +92 327 5226107
     `.trim();
 
-    // Automatic customer email disabled per admin specification.
-    // Admin receives instant notification at NOTIFICATION_DESTINATION and can manually choose WhatsApp or Email.
-    console.log(`[BOOKING CREATED] Request ${newBooking.id} received for ${newBooking.fullName}. Auto customer email suppressed.`);
+    // Automated Customer Confirmation Email
+    try {
+      await dispatchEmail({
+        to: newBooking.email,
+        subject: `We Received Your Service Inquiry — TechFix Peshawar (Ref #${newBooking.id})`,
+        html: customerConfirmationHtml,
+        text: customerConfirmationText
+      });
+      console.log(`[BOOKING CREATED] Automated confirmation email dispatched to customer: ${newBooking.email}`);
+    } catch (custMailErr) {
+      console.error(`[BOOKING CREATED] Automated customer email error:`, custMailErr);
+    }
   }
 
   db.activityLogs.unshift({
@@ -2961,13 +3383,56 @@ Helpline / WhatsApp: +92 327 5226107
 });
 
 // Endpoint to send/relay email notifications to techfixpeshawar@gmail.com
-app.post('/api/notify-email', async (req, res) => {
-  const { recipient, subject, bodyText, payload } = req.body;
+app.post('/api/notify-email', checkAdminAuth, async (req, res) => {
+  const { recipient, subject, bodyText, payload, html } = req.body;
   const targetEmail = recipient || NOTIFICATION_DESTINATION;
+
+  let emailHtml = html;
+  if (!emailHtml && payload) {
+    const safeName = String(payload.customer_name || 'Customer').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeService = String(payload.service_required || 'PC Repair').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safePhone = String(payload.customer_phone || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeWhatsapp = String(payload.customer_whatsapp || safePhone).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeArea = String(payload.area || 'Peshawar').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeModel = String(payload.computer_model || 'Not specified').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeDesc = String(payload.problem_description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const waLink = payload.whatsapp_reply_link || `https://wa.me/${safePhone.replace(/[^0-9]/g, '')}`;
+
+    emailHtml = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b;">
+        <div style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center;">
+          <h1 style="margin: 0; font-size: 20px; color: #ffffff;">NEW ON-SITE SERVICE REQUEST</h1>
+          <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
+        </div>
+        <div style="padding: 24px;">
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
+            <tr><td style="padding: 8px 0; color: #94a3b8; width: 140px;">Customer:</td><td style="padding: 8px 0; font-weight: bold; color: #f8fafc;">${safeName}</td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">Phone:</td><td style="padding: 8px 0;"><a href="tel:${safePhone}" style="color: #38bdf8; text-decoration: none;">${safePhone}</a></td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">WhatsApp:</td><td style="padding: 8px 0;"><a href="${waLink}" style="color: #34d399; text-decoration: none;">${safeWhatsapp}</a></td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">Location / Area:</td><td style="padding: 8px 0; color: #f8fafc;">${safeArea} (Peshawar)</td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">Service:</td><td style="padding: 8px 0; font-weight: bold; color: #fbbf24;">${safeService}</td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">Device / Model:</td><td style="padding: 8px 0; color: #f8fafc;">${safeModel}</td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">Preferred Slot:</td><td style="padding: 8px 0; color: #f8fafc;">${payload.preferred_date || ''} (${payload.preferred_time || ''})</td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">Urgency:</td><td style="padding: 8px 0; font-weight: bold; color: #f87171;">${String(payload.urgency || 'Normal').toUpperCase()}</td></tr>
+            <tr><td style="padding: 8px 0; color: #94a3b8;">Important Data:</td><td style="padding: 8px 0; color: #f8fafc;">${payload.contains_important_data || 'NO'}</td></tr>
+          </table>
+          <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+            <p style="margin: 0 0 6px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
+            <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${safeDesc}</p>
+          </div>
+          <div style="text-align: center;">
+            <a href="${waLink}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin-right: 10px;">Reply on WhatsApp</a>
+            <a href="tel:${safePhone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px;">Call Customer</a>
+          </div>
+        </div>
+      </div>
+    `;
+  }
 
   const result = await dispatchEmail({
     to: targetEmail,
     subject: subject || `New PC Service Alert: ${payload?.customer_name || 'Customer'}`,
+    html: emailHtml,
     text: bodyText || JSON.stringify(payload, null, 2)
   });
 
@@ -3025,9 +3490,27 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
     });
   }
 
+  const fsDbInq = getFirestoreInstance();
+  if (fsDbInq && req.body.id) {
+    try {
+      const existingDoc = await fsDbInq.collection('inquiries').doc(String(req.body.id).trim()).get();
+      if (existingDoc.exists) {
+        const existingData = existingDoc.data();
+        return res.json({
+          success: true,
+          inquiry: existingData,
+          message: "Your inquiry is already received and queued for response.",
+          isDuplicate: true
+        });
+      }
+    } catch (e) {
+      console.warn('[FIRESTORE] Idempotency inquiry check failed:', e);
+    }
+  }
+
   const cleanPhone = phoneVal.normalized!;
   const cleanFullName = nameVal.clean!;
-  const cleanEmail = email ? String(email).trim() : '';
+  const cleanEmail = extractCustomerEmail(req.body);
   const cleanWhatsapp = whatsapp ? (validatePakistaniPhone(whatsapp).normalized || String(whatsapp).trim()) : cleanPhone;
   const cleanArea = area ? String(area).trim() : 'Peshawar';
   const cleanSubject = String(subject || service || 'General Computer Service Inquiry').trim();
@@ -3104,10 +3587,15 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
 
   // Sync customer profile
   const existingCustomer = db.customers.find((c: any) => c.phone === newInquiry.phone);
-  if (!existingCustomer) {
+  if (existingCustomer) {
+    if (cleanEmail && !existingCustomer.email) {
+      existingCustomer.email = cleanEmail;
+    }
+  } else {
     db.customers.unshift({
       id: `CUST-${Date.now()}`,
       name: newInquiry.fullName,
+      email: cleanEmail || '',
       phone: newInquiry.phone,
       whatsapp: newInquiry.whatsapp,
       area: newInquiry.area,
@@ -3115,7 +3603,6 @@ async function handleInquirySubmission(req: express.Request, res: express.Respon
       totalSpent: "Rs. 0",
       lastServiceDate: new Date().toISOString().split('T')[0],
       notes: `Lead Inquiry: ${newInquiry.subject}`,
-      devices: []
     });
   }
 
@@ -3162,8 +3649,8 @@ async function handleResendInquiryEmail(req: express.Request, res: express.Respo
     try {
       const fsDb = getFirestoreInstance();
       if (fsDb) {
-        const snap = await getDoc(doc(fsDb, 'inquiries', String(id)));
-        if (snap.exists()) {
+        const snap = await fsDb.collection('inquiries').doc(String(id)).get();
+        if (snap.exists) {
           inquiry = { id: snap.id, ...snap.data() };
         }
       }
@@ -3232,11 +3719,11 @@ async function handleResendInquiryEmail(req: express.Request, res: express.Respo
   });
 }
 
-app.post('/api/inquiries/:id/resend-email', handleResendInquiryEmail);
-app.post('/api/contact/:id/resend-email', handleResendInquiryEmail);
+app.post('/api/inquiries/:id/resend-email', checkAdminAuth, handleResendInquiryEmail);
+app.post('/api/contact/:id/resend-email', checkAdminAuth, handleResendInquiryEmail);
 
 // PATCH endpoint to update inquiry status
-app.patch('/api/inquiries/:id', (req, res) => {
+app.patch('/api/inquiries/:id', checkAdminAuth, (req, res) => {
   const { id } = req.params;
   const { status, notes } = req.body;
   const inquiry: any = (db.inquiries || []).find((inq: any) => inq.id === id);
@@ -3253,7 +3740,7 @@ app.patch('/api/inquiries/:id', (req, res) => {
 });
 
 // DELETE endpoint to remove an inquiry (handles both /api/inquiries and /api/admin/inquiries)
-const handleDeleteInquiry = (req: express.Request, res: express.Response) => {
+const handleDeleteInquiry = async (req: express.Request, res: express.Response) => {
   const rawId = req.params.id || '';
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
@@ -3284,14 +3771,21 @@ const handleDeleteInquiry = (req: express.Request, res: express.Response) => {
   );
 
   saveDb();
+
+  // Authoritatively delete from Firestore so it never returns on cold start
+  const targetDeleteId = removedItem?.id || decodedId || rawId;
+  if (targetDeleteId) {
+    await deleteInquiryFromFirestore(targetDeleteId);
+  }
+
   res.json({ 
     success: true, 
     removedId: removedItem?.id || decodedId,
-    message: "Lead inquiry deleted successfully" 
+    message: "Lead inquiry deleted successfully from database" 
   });
 };
 
-app.delete('/api/inquiries/:id', handleDeleteInquiry);
+app.delete('/api/inquiries/:id', checkAdminAuth, handleDeleteInquiry);
 app.delete('/api/admin/inquiries/:id', checkAdminAuth, handleDeleteInquiry);
 
 // Admin Test Email Dispatch
@@ -3553,7 +4047,7 @@ app.get('/api/admin/data', checkAdminAuth, async (req, res) => {
 // ----------------- PAGE SECTIONS & CONTENT CMS API -----------------
 
 // Update whole section or page metadata (title, subtitle, badge)
-app.put('/api/admin/page-sections/:sectionKey', checkAdminAuth, (req, res) => {
+app.put('/api/admin/page-sections/:sectionKey', checkAdminAuth, async (req, res) => {
   const { sectionKey } = req.params;
   const updates = req.body;
   if (!db.pageSections) {
@@ -3579,11 +4073,12 @@ app.put('/api/admin/page-sections/:sectionKey', checkAdminAuth, (req, res) => {
   });
 
   saveDb();
+  await savePageSectionsToFirestore(db.pageSections);
   res.json({ success: true, section: (db.pageSections as any)[sectionKey], pageSections: db.pageSections });
 });
 
 // Toggle page publish status (published / unpublished)
-app.put('/api/admin/page-status/:sectionKey', checkAdminAuth, (req, res) => {
+app.put('/api/admin/page-status/:sectionKey', checkAdminAuth, async (req, res) => {
   const { sectionKey } = req.params;
   const { status } = req.body;
   if (!db.pageSections) {
@@ -3609,11 +4104,12 @@ app.put('/api/admin/page-status/:sectionKey', checkAdminAuth, (req, res) => {
   });
 
   saveDb();
+  await savePageSectionsToFirestore(db.pageSections);
   res.json({ success: true, sectionKey, status: newStatus, pageStatuses: db.pageSections.pageStatuses });
 });
 
 // Add new content item to a section's sub-collection
-app.post('/api/admin/page-sections/:sectionKey/:collectionKey', checkAdminAuth, (req, res) => {
+app.post('/api/admin/page-sections/:sectionKey/:collectionKey', checkAdminAuth, async (req, res) => {
   const { sectionKey, collectionKey } = req.params;
   const itemData = req.body;
 
@@ -3646,11 +4142,12 @@ app.post('/api/admin/page-sections/:sectionKey/:collectionKey', checkAdminAuth, 
   });
 
   saveDb();
+  await savePageSectionsToFirestore(db.pageSections);
   res.status(201).json({ success: true, item: newItem, collection: section[collectionKey] });
 });
 
 // Edit existing content item in a section's sub-collection
-app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, (req, res) => {
+app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, async (req, res) => {
   const { sectionKey, collectionKey, itemId } = req.params;
   const updates = req.body;
 
@@ -3682,11 +4179,12 @@ app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdmi
   });
 
   saveDb();
+  await savePageSectionsToFirestore(db.pageSections);
   res.json({ success: true, item: section[collectionKey][index], collection: section[collectionKey] });
 });
 
 // Delete content item from a section's sub-collection
-app.delete('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, (req, res) => {
+app.delete('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkAdminAuth, async (req, res) => {
   const { sectionKey, collectionKey, itemId } = req.params;
 
   if (!db.pageSections) {
@@ -3713,11 +4211,12 @@ app.delete('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId', checkA
   });
 
   saveDb();
+  await savePageSectionsToFirestore(db.pageSections);
   res.json({ success: true, removedId: itemId, collection: section[collectionKey] });
 });
 
 // Toggle content item published / unpublished status
-app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId/toggle', checkAdminAuth, (req, res) => {
+app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId/toggle', checkAdminAuth, async (req, res) => {
   const { sectionKey, collectionKey, itemId } = req.params;
 
   if (!db.pageSections) {
@@ -3746,11 +4245,12 @@ app.put('/api/admin/page-sections/:sectionKey/:collectionKey/:itemId/toggle', ch
   });
 
   saveDb();
+  await savePageSectionsToFirestore(db.pageSections);
   res.json({ success: true, item: section[collectionKey][index], newStatus });
 });
 
 // ----------------- SERVICES CRUD -----------------
-app.post('/api/admin/services', checkAdminAuth, (req, res) => {
+app.post('/api/admin/services', checkAdminAuth, async (req, res) => {
   const { title, shortDesc, fullDesc, priceStarting, priceNote, turnaround, icon, customIcon, status, workflow, warningNote, diagnosticSteps } = req.body;
   if (!title) {
     return res.status(400).json({ error: "Service title is required" });
@@ -3784,10 +4284,11 @@ app.post('/api/admin/services', checkAdminAuth, (req, res) => {
   });
 
   saveDb();
+  await saveServiceToFirestore(newService);
   res.status(201).json({ success: true, service: newService });
 });
 
-app.put('/api/admin/services/:id', checkAdminAuth, (req, res) => {
+app.put('/api/admin/services/:id', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const index = db.services.findIndex((s: any) => s.id === id);
   if (index === -1) {
@@ -3804,14 +4305,16 @@ app.put('/api/admin/services/:id', checkAdminAuth, (req, res) => {
   });
 
   saveDb();
+  await saveServiceToFirestore(db.services[index]);
   res.json({ success: true, service: db.services[index] });
 });
 
-app.delete('/api/admin/services/:id', checkAdminAuth, (req, res) => {
+app.delete('/api/admin/services/:id', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const item = db.services.find((s: any) => s.id === id || s.key === id);
   if (!item) {
-    // If already deleted or not found, return success so frontend state stays clean
+    // Also ensure deleted from Firestore
+    await deleteServiceFromFirestore(id);
     return res.json({ success: true, message: "Item was already deleted" });
   }
 
@@ -3825,10 +4328,11 @@ app.delete('/api/admin/services/:id', checkAdminAuth, (req, res) => {
   });
 
   saveDb();
+  await deleteServiceFromFirestore(item.id || id);
   res.json({ success: true, deletedId: id });
 });
 
-const handleToggleService = (req: any, res: any) => {
+const handleToggleService = async (req: any, res: any) => {
   const { id } = req.params;
   const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
   if (index === -1) return res.status(404).json({ error: "Service not found" });
@@ -3845,33 +4349,36 @@ const handleToggleService = (req: any, res: any) => {
   });
 
   saveDb();
+  await saveServiceToFirestore(db.services[index]);
   res.json({ success: true, service: db.services[index] });
 };
 
 app.put('/api/admin/services/:id/toggle', checkAdminAuth, handleToggleService);
 app.patch('/api/admin/services/:id/toggle', checkAdminAuth, handleToggleService);
 
-app.post('/api/admin/services/:id/publish', checkAdminAuth, (req, res) => {
+app.post('/api/admin/services/:id/publish', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
   if (index === -1) return res.status(404).json({ error: "Service not found" });
 
   db.services[index].status = 'active';
   saveDb();
+  await saveServiceToFirestore(db.services[index]);
   res.json({ success: true, service: db.services[index] });
 });
 
-app.post('/api/admin/services/:id/unpublish', checkAdminAuth, (req, res) => {
+app.post('/api/admin/services/:id/unpublish', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const index = db.services.findIndex((s: any) => s.id === id || s.key === id);
   if (index === -1) return res.status(404).json({ error: "Service not found" });
 
   db.services[index].status = 'inactive';
   saveDb();
+  await saveServiceToFirestore(db.services[index]);
   res.json({ success: true, service: db.services[index] });
 });
 
-app.post('/api/admin/services/reorder', checkAdminAuth, (req, res) => {
+app.post('/api/admin/services/reorder', checkAdminAuth, async (req, res) => {
   const { serviceIds } = req.body;
   if (!Array.isArray(serviceIds)) {
     return res.status(400).json({ error: "serviceIds array required" });
@@ -3896,14 +4403,16 @@ app.post('/api/admin/services/reorder', checkAdminAuth, (req, res) => {
 
   db.services = reordered;
   saveDb();
+  await Promise.all(db.services.map((s: any) => saveServiceToFirestore(s)));
   res.json({ success: true, services: db.services });
 });
 
-app.put('/api/admin/services', checkAdminAuth, (req, res) => {
+app.put('/api/admin/services', checkAdminAuth, async (req, res) => {
   const { services } = req.body;
   if (Array.isArray(services)) {
     db.services = services;
     saveDb();
+    await Promise.all(db.services.map((s: any) => saveServiceToFirestore(s)));
     return res.json({ success: true, services: db.services });
   }
   res.status(400).json({ error: "Invalid services format" });
@@ -4238,7 +4747,7 @@ app.post('/api/admin/bookings', checkAdminAuth, (req, res) => {
   res.status(201).json({ success: true, booking: newBooking });
 });
 
-app.put('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
+app.put('/api/admin/bookings/:id', checkAdminAuth, async (req, res) => {
   const rawId = req.params.id || '';
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
@@ -4251,33 +4760,56 @@ app.put('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
   );
 
   if (index === -1) {
-    // If not found in in-memory list, upsert it so updates succeed
-    const newBooking = {
-      id: decodedId || rawId,
-      createdAt: new Date().toISOString(),
-      fullName: req.body.fullName || 'Customer',
-      phone: req.body.phone || '',
-      whatsapp: req.body.whatsapp || req.body.phone || '',
-      area: req.body.area || 'Peshawar',
-      deviceType: req.body.deviceType || 'Laptop',
-      computerBrandModel: req.body.computerBrandModel || '',
-      serviceRequired: req.body.serviceRequired || 'General Diagnostic',
-      problemDescription: req.body.problemDescription || '',
-      preferredDate: req.body.preferredDate || new Date().toISOString().split('T')[0],
-      preferredTime: req.body.preferredTime || '',
-      urgency: req.body.urgency || 'Normal',
-      containsImportantData: req.body.containsImportantData || 'NO',
-      status: req.body.status || 'NEW',
-      adminNotes: req.body.adminNotes || '',
-      ...req.body
-    };
-    db.bookings.unshift(newBooking);
+    // Look up in Firestore first to avoid overwriting or creating blank records
+    const fsDb = getFirestoreInstance();
+    let fsBooking: any = null;
+    if (fsDb) {
+      try {
+        const snap = await fsDb.collection('requests').doc(decodedId).get();
+        if (snap.exists) {
+          fsBooking = { id: snap.id, ...snap.data() };
+        } else {
+          const srvSnap = await fsDb.collection('serviceRequests').doc(decodedId).get();
+          if (srvSnap.exists) {
+            fsBooking = { id: srvSnap.id, ...srvSnap.data() };
+          }
+        }
+      } catch (e) {
+        console.error('[FIRESTORE] Lookup failed in PUT booking:', e);
+      }
+    }
+
+    if (!fsBooking) {
+      return res.status(404).json({ error: `Booking not found: ${decodedId}` });
+    }
+
+    const incomingEmail = extractCustomerEmail(req.body);
+    const existingEmail = extractCustomerEmail(fsBooking);
+    const finalEmail = incomingEmail || existingEmail;
+
+    const updated = { ...fsBooking, ...req.body, id: fsBooking.id || decodedId };
+    if (finalEmail) {
+      updated.email = finalEmail;
+    } else {
+      delete updated.email;
+    }
+    db.bookings.unshift(updated);
     saveDb();
-    return res.json({ success: true, booking: newBooking });
+    await saveBookingToFirestore(updated);
+    return res.json({ success: true, booking: updated });
   }
+
+  const incomingEmail = extractCustomerEmail(req.body);
+  const existingEmail = extractCustomerEmail(db.bookings[index]);
+  const finalEmail = incomingEmail || existingEmail;
 
   const prevStatus = db.bookings[index].status;
   db.bookings[index] = { ...db.bookings[index], ...req.body, id: db.bookings[index].id };
+  if (finalEmail) {
+    db.bookings[index].email = finalEmail;
+  } else {
+    delete db.bookings[index].email;
+  }
 
   if (req.body.status && req.body.status !== prevStatus) {
     db.activityLogs.unshift({
@@ -4290,6 +4822,7 @@ app.put('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
   }
 
   saveDb();
+  await saveBookingToFirestore(db.bookings[index]);
   res.json({ success: true, booking: db.bookings[index] });
 });
 
@@ -4307,6 +4840,27 @@ app.post('/api/admin/bookings/:id/confirm', checkAdminAuth, async (req, res) => 
   );
 
   if (!booking) {
+    const fsDb = getFirestoreInstance();
+    if (fsDb) {
+      try {
+        const snap = await fsDb.collection('requests').doc(decodedId).get();
+        if (snap.exists) {
+          booking = { id: snap.id, ...snap.data() };
+          db.bookings.unshift(booking);
+        } else {
+          const srvSnap = await fsDb.collection('serviceRequests').doc(decodedId).get();
+          if (srvSnap.exists) {
+            booking = { id: srvSnap.id, ...srvSnap.data() };
+            db.bookings.unshift(booking);
+          }
+        }
+      } catch (e) {
+        console.error('[FIRESTORE] Lookup failed in confirm booking:', e);
+      }
+    }
+  }
+
+  if (!booking) {
     return res.status(404).json({ error: "Booking not found" });
   }
 
@@ -4315,6 +4869,14 @@ app.post('/api/admin/bookings/:id/confirm', checkAdminAuth, async (req, res) => 
   booking.scheduledTime = scheduledTime;
   if (req.body.adminNotes !== undefined) {
     booking.adminNotes = req.body.adminNotes;
+  }
+  const incomingEmail = extractCustomerEmail(req.body);
+  if (incomingEmail) {
+    booking.email = incomingEmail;
+  } else {
+    // Preserve existing normalized email
+    const norm = extractCustomerEmail(booking);
+    if (norm) booking.email = norm;
   }
 
   // Also update linked Lead/Inquiry if exists
@@ -4338,6 +4900,8 @@ app.post('/api/admin/bookings/:id/confirm', checkAdminAuth, async (req, res) => 
   });
 
   saveDb();
+  await saveBookingToFirestore(booking);
+  if (lead) await saveInquiryToFirestore(lead);
 
   // Customer email is only sent if explicitly requested by admin (manual dispatch mode)
   let emailDelivery: any = { status: "not_attempted" };
@@ -4398,20 +4962,47 @@ app.post('/api/admin/bookings/:id/send-confirmation-email', checkAdminAuth, asyn
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
 
-  const booking = db.bookings.find((b: any) => 
+  console.log(`[CONFIRM-EMAIL] Lookup requested for id="${decodedId}"`);
+
+  let booking: any = db.bookings.find((b: any) => 
     (b.id && b.id.trim().toLowerCase() === targetIdLower) ||
     b.id === rawId ||
     b.id === decodedId
   );
 
+  // Firestore fallback: on cold-start serverless instances the in-memory store
+  // may not yet contain every document — look in requests and serviceRequests.
   if (!booking) {
-    return res.status(404).json({ error: "Booking not found" });
+    const fsDb = getFirestoreInstance();
+    if (fsDb) {
+      try {
+        const collections = ['requests', 'serviceRequests', 'bookings'];
+        for (const col of collections) {
+          const snap = await fsDb.collection(col).doc(decodedId).get();
+          if (snap.exists) {
+            booking = { id: snap.id, ...snap.data() };
+            db.bookings.unshift(booking); // cache in memory for this instance
+            console.log(`[CONFIRM-EMAIL] Found "${decodedId}" in Firestore/${col}`);
+            break;
+          }
+        }
+      } catch (e) {
+        console.error('[CONFIRM-EMAIL] Firestore fallback error:', (e as Error).message);
+      }
+    }
+  }
+
+  if (!booking) {
+    console.warn(`[CONFIRM-EMAIL] 404 – id="${decodedId}" not found in memory or Firestore`);
+    return res.status(404).json({ error: `Booking not found (id: ${decodedId}). The record may have been deleted or the ID is incorrect.` });
   }
 
   // Allow admin to override/correct customer email if provided
-  let targetEmail = (req.body?.customerEmail && String(req.body.customerEmail).trim()) || (booking as any).email;
-  if (!targetEmail || !targetEmail.includes('@') || !targetEmail.includes('.')) {
-    return res.status(400).json({ error: "No valid customer email address on file for this booking. Please specify a valid email." });
+  const incoming = extractCustomerEmail({ email: req.body?.customerEmail });
+  const onFile = extractCustomerEmail(booking);
+  let targetEmail = incoming || onFile;
+  if (!targetEmail) {
+    return res.status(400).json({ error: "No valid customer email address on file for this booking. Please specify a valid customer email." });
   }
 
   // Detect common domain typos (e.g. @gmil.com instead of @gmail.com)
@@ -4422,10 +5013,11 @@ app.post('/api/admin/bookings/:id/send-confirmation-email', checkAdminAuth, asyn
     });
   }
 
-  // If customerEmail was corrected by admin, persist it to the booking record
-  if (req.body?.customerEmail && req.body.customerEmail.trim() !== (booking as any).email) {
-    (booking as any).email = targetEmail;
+  // If customerEmail was supplied or corrected by admin, persist it to the booking record
+  if (incoming && incoming !== (booking as any).email) {
+    (booking as any).email = incoming;
     saveDb();
+    await saveBookingToFirestore(booking);
   }
 
   const scheduledTime = req.body.scheduledTime || booking.scheduledTime || `${booking.preferredDate || 'Tomorrow'} (${booking.preferredTime || 'Morning'})`;
@@ -4469,6 +5061,12 @@ If you need assistance, please call ${techPhone}.
       });
     }
 
+    // Persist confirmed state to Firestore
+    booking.status = "CONFIRMED";
+    booking.scheduledTime = scheduledTime;
+    saveDb();
+    await saveBookingToFirestore(booking);
+
     return res.json({
       success: true,
       delivered: true,
@@ -4499,8 +5097,29 @@ app.post('/api/admin/bookings/:id/contact', checkAdminAuth, async (req, res) => 
   );
 
   if (!booking) {
-    return res.status(404).json({ error: "Booking not found" });
+    const fsDb = getFirestoreInstance();
+    if (fsDb) {
+      try {
+        for (const col of ['requests', 'serviceRequests', 'bookings']) {
+          const snap = await fsDb.collection(col).doc(decodedId).get();
+          if (snap.exists) {
+            booking = { id: snap.id, ...snap.data() };
+            db.bookings.unshift(booking);
+            console.log(`[CONTACT] Found "${decodedId}" in Firestore/${col}`);
+            break;
+          }
+        }
+      } catch (e) {
+        console.error('[CONTACT] Firestore fallback error:', (e as Error).message);
+      }
+    }
   }
+
+  if (!booking) {
+    console.warn(`[CONTACT] 404 – id="${decodedId}" not found`);
+    return res.status(404).json({ error: `Booking not found (id: ${decodedId}). The record may have been deleted.` });
+  }
+
 
   booking.status = "CONTACTED";
   const technicianNote = req.body.technicianNote || req.body.adminNotes || "Our technician has reviewed your request and is reaching out to coordinate diagnostic details.";
@@ -4528,6 +5147,8 @@ app.post('/api/admin/bookings/:id/contact', checkAdminAuth, async (req, res) => 
   });
 
   saveDb();
+  await saveBookingToFirestore(booking);
+  if (lead) await saveInquiryToFirestore(lead);
 
   // Trigger Contact Email to Customer only if explicitly requested
   let emailDelivery: any = { status: "not_attempted" };
@@ -4590,6 +5211,11 @@ app.post('/api/admin/inquiries/:id/confirm', checkAdminAuth, async (req, res) =>
   const scheduledTime = req.body.scheduledTime || `${(inquiry as any).preferredDate || new Date().toISOString().split('T')[0]} (${(inquiry as any).preferredTime || 'Morning (10 AM - 1 PM)'})`;
   inquiry.status = "CONVERTED";
 
+  const incomingEmail = extractCustomerEmail(req.body);
+  if (incomingEmail) {
+    inquiry.email = incomingEmail;
+  }
+
   // Find or create linked booking
   let booking = db.bookings.find((b: any) => b.id === (inquiry as any).bookingId || (inquiry.phone && b.phone === inquiry.phone));
   if (!booking) {
@@ -4597,7 +5223,7 @@ app.post('/api/admin/inquiries/:id/confirm', checkAdminAuth, async (req, res) =>
       id: (inquiry as any).bookingId || `PSH-${Date.now().toString(36).toUpperCase()}-${Math.floor(100 + Math.random() * 900)}`,
       createdAt: new Date().toISOString(),
       fullName: inquiry.fullName,
-      email: inquiry.email,
+      email: incomingEmail || inquiry.email,
       phone: inquiry.phone,
       whatsapp: inquiry.whatsapp || inquiry.phone,
       area: inquiry.area || "Peshawar",
@@ -4618,10 +5244,13 @@ app.post('/api/admin/inquiries/:id/confirm', checkAdminAuth, async (req, res) =>
   } else {
     booking.status = "CONFIRMED";
     booking.scheduledTime = scheduledTime;
+    if (incomingEmail) booking.email = incomingEmail;
     if (req.body.adminNotes) booking.adminNotes = req.body.adminNotes;
   }
 
   saveDb();
+  await saveInquiryToFirestore(inquiry);
+  await saveBookingToFirestore(booking);
 
   // Customer email is only sent if explicitly requested by admin (manual dispatch mode)
   let emailDelivery: any = { status: "not_attempted" };
@@ -4697,8 +5326,10 @@ app.post('/api/admin/inquiries/:id/send-confirmation-email', checkAdminAuth, asy
     status: "CONFIRMED"
   };
 
-  let targetEmail = (req.body?.customerEmail && String(req.body.customerEmail).trim()) || inquiry.email || (booking as any).email;
-  if (!targetEmail || !targetEmail.includes('@') || !targetEmail.includes('.')) {
+  const incoming = extractCustomerEmail({ email: req.body?.customerEmail });
+  const onFile = extractCustomerEmail(inquiry) || extractCustomerEmail(booking);
+  let targetEmail = incoming || onFile;
+  if (!targetEmail) {
     return res.status(400).json({ error: "No valid customer email address on file for this inquiry. Please provide a valid email." });
   }
 
@@ -4709,10 +5340,12 @@ app.post('/api/admin/inquiries/:id/send-confirmation-email', checkAdminAuth, asy
     });
   }
 
-  if (req.body?.customerEmail && req.body.customerEmail.trim() !== inquiry.email) {
-    inquiry.email = targetEmail;
-    if (booking) (booking as any).email = targetEmail;
+  if (incoming && incoming !== inquiry.email) {
+    inquiry.email = incoming;
+    if (booking) (booking as any).email = incoming;
     saveDb();
+    await saveInquiryToFirestore(inquiry);
+    if (booking && (booking as any).id) await saveBookingToFirestore(booking);
   }
 
   const scheduledTime = req.body.scheduledTime || (booking as any).scheduledTime || `${(inquiry as any).preferredDate || 'Tomorrow'} (${(inquiry as any).preferredTime || 'Morning'})`;
@@ -4803,6 +5436,8 @@ app.post('/api/admin/inquiries/:id/contact', checkAdminAuth, async (req, res) =>
   }
 
   saveDb();
+  await saveInquiryToFirestore(inquiry);
+  if (booking && (booking as any).id) await saveBookingToFirestore(booking);
 
   // Send contact notification email only if explicitly requested
   let emailDelivery: any = { status: "not_attempted" };
@@ -4847,7 +5482,7 @@ ${technicianNote}
   });
 });
 
-app.delete('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
+app.delete('/api/admin/bookings/:id', checkAdminAuth, async (req, res) => {
   const rawId = req.params.id || '';
   const decodedId = decodeURIComponent(rawId).trim();
   const targetIdLower = decodedId.toLowerCase();
@@ -4884,6 +5519,8 @@ app.delete('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
 
   if (removedItem || db.bookings.length !== beforeLen) {
     saveDb();
+    const targetDeleteId = removedItem?.id || decodedId || rawId;
+    if (targetDeleteId) await deleteBookingFromFirestore(targetDeleteId);
   }
 
   // Idempotent success response ensures that deletion proceeds cleanly on frontend & Firestore
@@ -4895,7 +5532,7 @@ app.delete('/api/admin/bookings/:id', checkAdminAuth, (req, res) => {
 });
 
 // ----------------- CUSTOMERS CRUD -----------------
-app.post('/api/admin/customers', checkAdminAuth, (req, res) => {
+app.post('/api/admin/customers', checkAdminAuth, async (req, res) => {
   const { name, phone, whatsapp, area, notes, devices, totalSpent } = req.body;
   if (!name || !phone) {
     return res.status(400).json({ error: "Name and Phone are required" });
@@ -4924,28 +5561,31 @@ app.post('/api/admin/customers', checkAdminAuth, (req, res) => {
   });
 
   saveDb();
+  await saveCustomerToFirestore(newCust);
   res.status(201).json({ success: true, customer: newCust });
 });
 
-app.put('/api/admin/customers/:id', checkAdminAuth, (req, res) => {
+app.put('/api/admin/customers/:id', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const index = db.customers.findIndex((c: any) => c.id === id);
   if (index === -1) return res.status(404).json({ error: "Customer not found" });
 
   db.customers[index] = { ...db.customers[index], ...req.body, id };
   saveDb();
+  await saveCustomerToFirestore(db.customers[index]);
   res.json({ success: true, customer: db.customers[index] });
 });
 
-app.delete('/api/admin/customers/:id', checkAdminAuth, (req, res) => {
+app.delete('/api/admin/customers/:id', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   db.customers = db.customers.filter((c: any) => c.id !== id);
   saveDb();
+  await deleteCustomerFromFirestore(id);
   res.json({ success: true });
 });
 
 // ----------------- FAQS CRUD -----------------
-app.post('/api/admin/faqs', checkAdminAuth, (req, res) => {
+app.post('/api/admin/faqs', checkAdminAuth, async (req, res) => {
   const { question, answer, category } = req.body;
   if (!question || !answer) {
     return res.status(400).json({ error: "Question and Answer are required" });
@@ -4968,38 +5608,42 @@ app.post('/api/admin/faqs', checkAdminAuth, (req, res) => {
   });
 
   saveDb();
+  await saveFaqToFirestore(newFaq);
   res.status(201).json({ success: true, faq: newFaq });
 });
 
-app.put('/api/admin/faqs/:id', checkAdminAuth, (req, res) => {
+app.put('/api/admin/faqs/:id', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const index = db.faqs.findIndex((f: any) => f.id === id);
   if (index === -1) return res.status(404).json({ error: "FAQ not found" });
 
   db.faqs[index] = { ...db.faqs[index], ...req.body, id };
   saveDb();
+  await saveFaqToFirestore(db.faqs[index]);
   res.json({ success: true, faq: db.faqs[index] });
 });
 
-app.delete('/api/admin/faqs/:id', checkAdminAuth, (req, res) => {
+app.delete('/api/admin/faqs/:id', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   db.faqs = db.faqs.filter((f: any) => f.id !== id);
   saveDb();
+  await deleteFaqFromFirestore(id);
   res.json({ success: true });
 });
 
-app.put('/api/admin/faqs', checkAdminAuth, (req, res) => {
+app.put('/api/admin/faqs', checkAdminAuth, async (req, res) => {
   const { faqs } = req.body;
   if (Array.isArray(faqs)) {
     db.faqs = faqs;
     saveDb();
+    await Promise.all(db.faqs.map((f: any) => saveFaqToFirestore(f)));
     return res.json({ success: true, faqs: db.faqs });
   }
   res.status(400).json({ error: "Invalid faqs format" });
 });
 
 // ----------------- CASE STUDIES CRUD -----------------
-app.post('/api/admin/case-studies', checkAdminAuth, (req, res) => {
+app.post('/api/admin/case-studies', checkAdminAuth, async (req, res) => {
   const { title, customerType, problem, diagnosis, solution, result, deviceInfo } = req.body;
   if (!problem || !solution) {
     return res.status(400).json({ error: "Problem and solution are required" });
@@ -5024,22 +5668,26 @@ app.post('/api/admin/case-studies', checkAdminAuth, (req, res) => {
     user: "Safiullah (Admin)"
   });
   saveDb();
+  await saveCaseStudyToFirestore(newCase);
   res.json({ success: true, caseStudy: newCase });
 });
 
-app.put('/api/admin/case-studies/:id', checkAdminAuth, (req, res) => {
+app.put('/api/admin/case-studies/:id', checkAdminAuth, async (req, res) => {
   const { id } = req.params;
   const index = db.caseStudies.findIndex((c: any) => c.id === id);
   if (index === -1) return res.status(404).json({ error: "Case study not found" });
 
   db.caseStudies[index] = { ...db.caseStudies[index], ...req.body, id };
   saveDb();
+  await saveCaseStudyToFirestore(db.caseStudies[index]);
   res.json({ success: true, caseStudy: db.caseStudies[index] });
 });
 
-app.delete('/api/admin/case-studies/:id', checkAdminAuth, (req, res) => {
-  db.caseStudies = db.caseStudies.filter((c: any) => c.id !== req.params.id);
+app.delete('/api/admin/case-studies/:id', checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  db.caseStudies = db.caseStudies.filter((c: any) => c.id !== id);
   saveDb();
+  await deleteCaseStudyFromFirestore(id);
   res.json({ success: true });
 });
 

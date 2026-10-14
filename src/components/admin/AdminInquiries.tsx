@@ -28,6 +28,7 @@ import {
   sendManualInquiryConfirmationEmail 
 } from '../../utils/api';
 import { formatPKTDateTime, formatPKTTime } from '../../utils/dateTime';
+import { extractCustomerEmail } from '../../utils/emailNormalization';
 import { 
   getWhatsAppLink, 
   generateInquiryWhatsAppMessage, 
@@ -69,7 +70,7 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
         : 'Tomorrow Morning (10:00 AM – 1:00 PM)';
       setConfirmSlotInput(defaultSlot);
       setTechnicianNoteInput(`Our technician has received your inquiry for ${selectedInquiry.service || selectedInquiry.subject} and is contacting you on WhatsApp to coordinate details.`);
-      setCustomerEmailInput(selectedInquiry.email || '');
+      setCustomerEmailInput(extractCustomerEmail(selectedInquiry));
       setIsConfirmOpen(false);
       setIsContactOpen(false);
       setLeadActionBanner(null);
@@ -81,7 +82,7 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
 
   const handleSendConfirmationEmailManual = async () => {
     if (!selectedInquiry || isSendingEmail) return;
-    const targetEmail = customerEmailInput.trim() || selectedInquiry.email || '';
+    const targetEmail = customerEmailInput.trim() || extractCustomerEmail(selectedInquiry);
     if (!targetEmail) {
       setLeadActionBanner({ type: 'error', message: 'No customer email address. Please enter an email above.' });
       return;
@@ -132,16 +133,19 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
     setLeadActionBanner(null);
 
     const slotToConfirm = confirmSlotInput.trim() || 'Tomorrow Morning (10:00 AM – 1:00 PM)';
+    const emailToUse = customerEmailInput.trim() ? extractCustomerEmail({ email: customerEmailInput.trim() }) : extractCustomerEmail(selectedInquiry);
 
     try {
       const res = await confirmInquiryAppointment(selectedInquiry.id, {
         scheduledTime: slotToConfirm,
-        sendEmail: false
+        sendEmail: false,
+        customerEmail: emailToUse || undefined
       });
 
       setSelectedInquiry({
         ...selectedInquiry,
-        status: 'CONVERTED'
+        status: 'CONVERTED',
+        ...(emailToUse ? { email: emailToUse, customerEmail: emailToUse } : {})
       });
 
       const waMessage = generateConfirmationWhatsAppMessage(
@@ -466,11 +470,20 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
 
                   {/* Metadata Row */}
                   <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 font-mono pt-1">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 flex-wrap">
                       <span className="flex items-center gap-1 text-slate-300">
                         <Phone className="h-3 w-3 text-blue-400" />
                         {inq.phone || (inq as any).whatsapp || (inq as any).phoneNumber || 'Not provided'}
                       </span>
+                      {(() => {
+                        const inqEmail = extractCustomerEmail(inq);
+                        return inqEmail ? (
+                          <span className="flex items-center gap-1 text-blue-300 truncate max-w-[180px]" title={inqEmail}>
+                            <Mail className="h-3 w-3 text-blue-400 shrink-0" />
+                            {inqEmail}
+                          </span>
+                        ) : null;
+                      })()}
                       {inq.area && (
                         <span className="flex items-center gap-1 text-slate-400">
                           <MapPin className="h-3 w-3 text-emerald-400" />
@@ -981,13 +994,19 @@ export function AdminInquiries({ inquiries, onRefresh }: AdminInquiriesProps) {
 
               <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
                 <span className="text-slate-500 text-[10px] font-mono block">EMAIL ADDRESS</span>
-                {selectedInquiry.email || (selectedInquiry as any).customerEmail || (selectedInquiry as any).customer_email ? (
-                  <a href={`mailto:${selectedInquiry.email || (selectedInquiry as any).customerEmail || (selectedInquiry as any).customer_email}`} className="text-blue-400 font-medium hover:underline mt-0.5 truncate block">
-                    {selectedInquiry.email || (selectedInquiry as any).customerEmail || (selectedInquiry as any).customer_email}
-                  </a>
-                ) : (
-                  <span className="text-slate-400 mt-0.5 block">Not provided</span>
-                )}
+                {(() => {
+                  const inqEmail = extractCustomerEmail(selectedInquiry);
+                  return inqEmail ? (
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <a href={`mailto:${inqEmail}`} className="text-blue-400 font-medium hover:underline truncate block font-mono">
+                        {inqEmail}
+                      </a>
+                      <span className="text-[9px] text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">Registered</span>
+                    </div>
+                  ) : (
+                    <span className="text-slate-400 mt-0.5 block">Not provided</span>
+                  );
+                })()}
               </div>
 
               <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
