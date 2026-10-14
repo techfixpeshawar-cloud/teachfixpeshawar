@@ -95,35 +95,65 @@ QUICK ACTIONS:
 `;
 
   const emailHtml = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b;">
-      <div style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center;">
-        <h1 style="margin: 0; font-size: 20px; color: #ffffff;">NEW ON-SITE SERVICE REQUEST</h1>
-        <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
-      </div>
-      <div style="padding: 24px;">
-        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
-          <tr><td style="padding: 8px 0; color: #94a3b8; width: 140px;">Customer:</td><td style="padding: 8px 0; font-weight: bold; color: #f8fafc;">${emailPayload.customer_name}</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Email:</td><td style="padding: 8px 0; color: #38bdf8;">${emailPayload.customer_email}</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Primary Phone:</td><td style="padding: 8px 0;"><a href="tel:${emailPayload.customer_phone}" style="color: #38bdf8; text-decoration: none;">${emailPayload.customer_phone}</a></td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">WhatsApp:</td><td style="padding: 8px 0;"><a href="${emailPayload.whatsapp_reply_link}" style="color: #34d399; text-decoration: none;">${emailPayload.customer_whatsapp}</a></td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Location / Area:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.area} (Peshawar)</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Service Required:</td><td style="padding: 8px 0; font-weight: bold; color: #fbbf24;">${emailPayload.service_required}</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Device / Model:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.device_type} — ${emailPayload.computer_model}</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Preferred Schedule:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.preferred_date} (${emailPayload.preferred_time})</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Urgency:</td><td style="padding: 8px 0; font-weight: bold; color: ${emailPayload.urgency === 'Urgent' ? '#f87171' : '#f8fafc'};">${emailPayload.urgency.toUpperCase()}</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Contains Important Data:</td><td style="padding: 8px 0; color: #f8fafc;">${emailPayload.contains_important_data}</td></tr>
-          <tr><td style="padding: 8px 0; color: #94a3b8;">Submitted Time:</td><td style="padding: 8px 0; color: #cbd5e1;">${emailPayload.timestamp}</td></tr>
-        </table>
-        <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
-          <p style="margin: 0 0 6px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
-          <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${emailPayload.problem_description}</p>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <meta http-equiv="X-UA-Compatible" content="IE=edge">
+      <style type="text/css">
+        body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+        table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+        @media only screen and (max-width: 600px) {
+          .email-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+          .email-pad { padding: 16px !important; }
+          .header-pad { padding: 20px 16px !important; }
+          .row-label { display: block !important; width: 100% !important; padding: 4px 0 2px 0 !important; font-size: 12px !important; color: #94a3b8 !important; }
+          .row-value { display: block !important; width: 100% !important; padding: 0 0 10px 0 !important; font-size: 14px !important; }
+          .btn-container { display: block !important; width: 100% !important; }
+          .btn-item { display: block !important; width: 100% !important; margin: 0 0 10px 0 !important; box-sizing: border-box !important; text-align: center !important; padding: 14px 20px !important; }
+        }
+        @media only screen and (min-width: 601px) and (max-width: 768px) {
+          .email-card { width: 94% !important; max-width: 620px !important; }
+          .email-pad { padding: 22px 20px !important; }
+        }
+      </style>
+    </head>
+    <body style="margin: 0; padding: 20px 0; background-color: #0b1120; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f8fafc;">
+      <div class="email-card" style="max-width: 600px; margin: 0 auto; background-color: #0f172a; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+        <div class="header-pad" style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
+          <h1 style="margin: 0; font-size: 20px; color: #ffffff; letter-spacing: 0.5px;">NEW ON-SITE SERVICE REQUEST</h1>
+          <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
         </div>
-        <div style="text-align: center;">
-          <a href="${emailPayload.whatsapp_reply_link}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin-right: 10px;">Reply on WhatsApp</a>
-          <a href="tel:${emailPayload.customer_phone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px;">Call Customer</a>
+        <div class="email-pad" style="padding: 24px;">
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8; width: 140px;">Customer:</td><td class="row-value" style="padding: 8px 0; font-weight: bold; color: #f8fafc;">${emailPayload.customer_name}</td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Email:</td><td class="row-value" style="padding: 8px 0; color: #38bdf8; font-weight: bold;"><a href="mailto:${emailPayload.customer_email || ''}" style="color: #38bdf8; text-decoration: none;">${emailPayload.customer_email || 'Not provided'}</a></td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Primary Phone:</td><td class="row-value" style="padding: 8px 0;"><a href="tel:${emailPayload.customer_phone}" style="color: #38bdf8; text-decoration: none; font-weight: bold;">${emailPayload.customer_phone}</a></td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">WhatsApp:</td><td class="row-value" style="padding: 8px 0;"><a href="${emailPayload.whatsapp_reply_link}" style="color: #34d399; text-decoration: none; font-weight: bold;">${emailPayload.customer_whatsapp}</a></td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Location / Area:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc; font-weight: bold;">${emailPayload.area} (Peshawar)</td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Service Required:</td><td class="row-value" style="padding: 8px 0; font-weight: bold; color: #fbbf24;">${emailPayload.service_required}</td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Device / Model:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc;">${emailPayload.device_type} — ${emailPayload.computer_model}</td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Preferred Schedule:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc;">${emailPayload.preferred_date} (${emailPayload.preferred_time})</td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Urgency:</td><td class="row-value" style="padding: 8px 0; font-weight: bold; color: ${emailPayload.urgency === 'Urgent' ? '#f87171' : '#f8fafc'};">${emailPayload.urgency.toUpperCase()}</td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Contains Important Data:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc;">${emailPayload.contains_important_data}</td></tr>
+            <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Submitted Time:</td><td class="row-value" style="padding: 8px 0; color: #cbd5e1;">${emailPayload.timestamp}</td></tr>
+          </table>
+          <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+            <p style="margin: 0 0 6px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
+            <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${emailPayload.problem_description}</p>
+          </div>
+          <div class="btn-container" style="text-align: center;">
+            <a class="btn-item" href="${emailPayload.whatsapp_reply_link}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin: 4px 6px;">Reply on WhatsApp</a>
+            <a class="btn-item" href="tel:${emailPayload.customer_phone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin: 4px 6px;">Call Customer</a>
+          </div>
+        </div>
+        <div style="background-color: #090d16; padding: 16px; text-align: center; border-top: 1px solid #1e293b; font-size: 12px; color: #64748b;">
+          Dispatched automatically to ${TARGET_EMAIL} • TechFix On-Site Computer Support Peshawar
         </div>
       </div>
-    </div>
+    </body>
+    </html>
   `;
 
   try {

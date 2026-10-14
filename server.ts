@@ -970,17 +970,35 @@ function generateBrandedEmailHtml({
 
   return `
   <!DOCTYPE html>
-  <html>
+  <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <title>Customer Lead Inquiry - TechFix Peshawar</title>
+    <style type="text/css">
+      body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+      table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+      @media only screen and (max-width: 600px) {
+        .email-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+        .email-pad { padding: 16px !important; }
+        .header-pad { padding: 20px 16px !important; }
+        .row-label { display: block !important; width: 100% !important; padding: 4px 0 2px 0 !important; font-size: 12px !important; color: #94a3b8 !important; }
+        .row-value { display: block !important; width: 100% !important; padding: 0 0 10px 0 !important; font-size: 14px !important; }
+        .btn-container { display: block !important; width: 100% !important; }
+        .btn-item { display: block !important; width: 100% !important; margin: 0 0 10px 0 !important; box-sizing: border-box !important; text-align: center !important; padding: 14px 20px !important; }
+      }
+      @media only screen and (min-width: 601px) and (max-width: 768px) {
+        .email-card { width: 94% !important; max-width: 620px !important; }
+        .email-pad { padding: 22px 20px !important; }
+      }
+    </style>
   </head>
-  <body style="margin:0; padding:24px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
-    <div style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
+  <body style="margin:0; padding:20px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
+    <div class="email-card" style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
       
       <!-- Brand Header Badge -->
-      <div style="background: linear-gradient(135deg, #0284c7, #0f766e); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
+      <div class="header-pad" style="background: linear-gradient(135deg, #0284c7, #0f766e); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
         <span style="display:inline-block; background-color:rgba(15, 23, 42, 0.6); color:#38bdf8; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:4px 12px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(56, 189, 248, 0.4);">
           ⚡ TECHFIX PESHAWAR • NEW INQUIRY ALERT
         </span>
@@ -993,7 +1011,7 @@ function generateBrandedEmailHtml({
       </div>
 
       <!-- Main Content -->
-      <div style="padding: 28px 24px;">
+      <div class="email-pad" style="padding: 28px 24px;">
         
         <!-- Summary Callout -->
         <div style="background-color:#1e293b; border-radius:12px; padding:16px 20px; margin-bottom:24px; border-left:4px solid #38bdf8;">
@@ -1009,37 +1027,37 @@ function generateBrandedEmailHtml({
         <table style="width:100%; border-collapse:collapse; margin-bottom:24px; font-size:14px;">
           <tbody>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8; width:150px; font-weight:600;">Client Name:</td>
-              <td style="padding:10px 0; color:#ffffff; font-weight:700;">${effectiveClientName}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; width:150px; font-weight:600;">Client Name:</td>
+              <td class="row-value" style="padding:10px 0; color:#ffffff; font-weight:700;">${effectiveClientName}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Email:</td>
-              <td style="padding:10px 0;">
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; font-weight:600;">Email:</td>
+              <td class="row-value" style="padding:10px 0;">
                 ${email ? `<a href="mailto:${email}" style="color:#38bdf8; text-decoration:none; font-weight:600;">${email}</a>` : '<span style="color:#64748b;">Not provided</span>'}
               </td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Phone / WhatsApp:</td>
-              <td style="padding:10px 0;">
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; font-weight:600;">Phone / WhatsApp:</td>
+              <td class="row-value" style="padding:10px 0;">
                 <a href="tel:${phone}" style="color:#34d399; text-decoration:none; font-weight:bold; margin-right:12px;">${phone}</a>
                 <a href="${waReplyLink}" style="display:inline-block; font-size:11px; background-color:#065f46; color:#a7f3d0; padding:2px 8px; border-radius:6px; text-decoration:none; font-weight:bold;">WhatsApp</a>
               </td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Subject / Service:</td>
-              <td style="padding:10px 0; color:#f1f5f9; font-weight:600;">${subject || service || 'Computer Diagnostics & Support'}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; font-weight:600;">Subject / Service:</td>
+              <td class="row-value" style="padding:10px 0; color:#f1f5f9; font-weight:600;">${subject || service || 'Computer Diagnostics & Support'}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Budget / Quote:</td>
-              <td style="padding:10px 0; color:#fbbf24; font-weight:bold;">${budget || 'Pending On-Site Inspection (From Rs. 500)'}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; font-weight:600;">Budget / Quote:</td>
+              <td class="row-value" style="padding:10px 0; color:#fbbf24; font-weight:bold;">${budget || 'Pending On-Site Inspection (From Rs. 500)'}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Location / Area:</td>
-              <td style="padding:10px 0; color:#f1f5f9;">${area || 'Peshawar'}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; font-weight:600;">Location / Area:</td>
+              <td class="row-value" style="padding:10px 0; color:#f1f5f9;">${area || 'Peshawar'}</td>
             </tr>
             <tr>
-              <td style="padding:10px 0; color:#94a3b8; font-weight:600;">Submitted Time:</td>
-              <td style="padding:10px 0; color:#38bdf8; font-weight:bold;">${getPeshawarDateTimeString()} (PKT, UTC+5)</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; font-weight:600;">Submitted Time:</td>
+              <td class="row-value" style="padding:10px 0; color:#38bdf8; font-weight:bold;">${getPeshawarDateTimeString()} (PKT, UTC+5)</td>
             </tr>
           </tbody>
         </table>
@@ -1053,13 +1071,13 @@ function generateBrandedEmailHtml({
         </div>
 
         <!-- High Contrast CTA Action Buttons -->
-        <div style="text-align:center; padding:10px 0 10px 0;">
+        <div class="btn-container" style="text-align:center; padding:10px 0 10px 0;">
           ${email ? `
-            <a href="${mailtoLink}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
+            <a class="btn-item" href="${mailtoLink}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
               ✉️ Reply Directly to Client
             </a>
           ` : ''}
-          <a href="${waReplyLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
+          <a class="btn-item" href="${waReplyLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
             💬 Chat on WhatsApp
           </a>
         </div>
@@ -1121,17 +1139,35 @@ function generateAppointmentConfirmedEmailHtml({
 
   return `
   <!DOCTYPE html>
-  <html>
+  <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <title>Appointment Confirmed - TechFix Peshawar</title>
+    <style type="text/css">
+      body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+      table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+      @media only screen and (max-width: 600px) {
+        .email-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+        .email-pad { padding: 16px !important; }
+        .header-pad { padding: 20px 16px !important; }
+        .row-label { display: block !important; width: 100% !important; padding: 4px 0 2px 0 !important; font-size: 12px !important; color: #94a3b8 !important; }
+        .row-value { display: block !important; width: 100% !important; padding: 0 0 10px 0 !important; font-size: 14px !important; }
+        .btn-container { display: block !important; width: 100% !important; }
+        .btn-item { display: block !important; width: 100% !important; margin: 0 0 10px 0 !important; box-sizing: border-box !important; text-align: center !important; padding: 14px 20px !important; }
+      }
+      @media only screen and (min-width: 601px) and (max-width: 768px) {
+        .email-card { width: 94% !important; max-width: 620px !important; }
+        .email-pad { padding: 22px 20px !important; }
+      }
+    </style>
   </head>
-  <body style="margin:0; padding:24px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
-    <div style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
+  <body style="margin:0; padding:20px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
+    <div class="email-card" style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
       
       <!-- Brand Header -->
-      <div style="background: linear-gradient(135deg, #059669, #0284c7); padding: 28px 24px; text-align: center; border-bottom: 2px solid #10b981;">
+      <div class="header-pad" style="background: linear-gradient(135deg, #059669, #0284c7); padding: 28px 24px; text-align: center; border-bottom: 2px solid #10b981;">
         <span style="display:inline-block; background-color:rgba(15, 23, 42, 0.7); color:#34d399; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:5px 14px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(52, 211, 153, 0.4);">
           ✓ APPOINTMENT SCHEDULED & CONFIRMED
         </span>
@@ -1144,7 +1180,7 @@ function generateAppointmentConfirmedEmailHtml({
       </div>
 
       <!-- Main Notification Body -->
-      <div style="padding: 28px 24px;">
+      <div class="email-pad" style="padding: 28px 24px;">
         <p style="margin:0 0 16px 0; font-size:15px; color:#e2e8f0; line-height:1.6;">
           Hello <strong>${booking.fullName}</strong>,
         </p>
@@ -1166,13 +1202,15 @@ function generateAppointmentConfirmedEmailHtml({
         </div>
 
         <!-- Reference ID Card -->
-        <div style="background-color:#1e293b; border-radius:10px; padding:14px 16px; margin-bottom:20px; border-left:4px solid #10b981; display:flex; justify-content:space-between; align-items:center;">
-          <div>
-            <div style="font-size:11px; font-weight:bold; text-transform:uppercase; color:#94a3b8;">Booking Reference ID</div>
-            <div style="font-size:18px; font-weight:bold; color:#38bdf8; font-family:monospace; margin-top:2px;">${booking.id}</div>
-          </div>
-          <div style="text-align:right;">
-            <span style="background-color:rgba(16, 185, 129, 0.2); color:#34d399; font-size:11px; font-weight:bold; padding:4px 10px; border-radius:6px; border:1px solid rgba(52, 211, 153, 0.3);">CONFIRMED</span>
+        <div style="background-color:#1e293b; border-radius:10px; padding:14px 16px; margin-bottom:20px; border-left:4px solid #10b981;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <div style="font-size:11px; font-weight:bold; text-transform:uppercase; color:#94a3b8;">Booking Reference ID</div>
+              <div style="font-size:18px; font-weight:bold; color:#38bdf8; font-family:monospace; margin-top:2px;">${booking.id}</div>
+            </div>
+            <div style="text-align:right;">
+              <span style="background-color:rgba(16, 185, 129, 0.2); color:#34d399; font-size:11px; font-weight:bold; padding:4px 10px; border-radius:6px; border:1px solid rgba(52, 211, 153, 0.3);">CONFIRMED</span>
+            </div>
           </div>
         </div>
 
@@ -1180,48 +1218,54 @@ function generateAppointmentConfirmedEmailHtml({
         <table style="width:100%; border-collapse:collapse; margin-bottom:24px; font-size:14px;">
           <tbody>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8; width:150px;">Customer:</td>
-              <td style="padding:10px 0; color:#f8fafc; font-weight:bold;">${booking.fullName}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8; width:150px;">Customer:</td>
+              <td class="row-value" style="padding:10px 0; color:#f8fafc; font-weight:bold;">${booking.fullName}</td>
+            </tr>
+            ${booking.email ? `
+            <tr style="border-bottom:1px solid #1e293b;">
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Customer Email:</td>
+              <td class="row-value" style="padding:10px 0; color:#38bdf8; font-weight:600;"><a href="mailto:${booking.email}" style="color:#38bdf8; text-decoration:none;">${booking.email}</a></td>
+            </tr>
+            ` : ''}
+            <tr style="border-bottom:1px solid #1e293b;">
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Primary Phone:</td>
+              <td class="row-value" style="padding:10px 0; color:#38bdf8; font-weight:bold;"><a href="tel:${booking.phone}" style="color:#38bdf8; text-decoration:none;">${booking.phone}</a></td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Primary Phone:</td>
-              <td style="padding:10px 0; color:#38bdf8; font-weight:bold;"><a href="tel:${booking.phone}" style="color:#38bdf8; text-decoration:none;">${booking.phone}</a></td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">WhatsApp:</td>
+              <td class="row-value" style="padding:10px 0; color:#34d399; font-weight:bold;">${booking.whatsapp || booking.phone}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">WhatsApp:</td>
-              <td style="padding:10px 0; color:#34d399; font-weight:bold;">${booking.whatsapp || booking.phone}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Area / Sector:</td>
+              <td class="row-value" style="padding:10px 0; color:#f8fafc; font-weight:bold;">${booking.area} (Peshawar)</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Area / Sector:</td>
-              <td style="padding:10px 0; color:#f8fafc; font-weight:bold;">${booking.area} (Peshawar)</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Service Required:</td>
+              <td class="row-value" style="padding:10px 0; color:#fbbf24; font-weight:bold;">${booking.serviceRequired}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Service Required:</td>
-              <td style="padding:10px 0; color:#fbbf24; font-weight:bold;">${booking.serviceRequired}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Device & Model:</td>
+              <td class="row-value" style="padding:10px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `— ${booking.computerBrandModel}` : ''}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Device & Model:</td>
-              <td style="padding:10px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `— ${booking.computerBrandModel}` : ''}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Preferred Schedule:</td>
+              <td class="row-value" style="padding:10px 0; color:#cbd5e1;">${booking.preferredDate} (${booking.preferredTime})</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Preferred Schedule:</td>
-              <td style="padding:10px 0; color:#cbd5e1;">${booking.preferredDate} (${booking.preferredTime})</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Confirmed Schedule:</td>
+              <td class="row-value" style="padding:10px 0; color:#34d399; font-weight:bold;">${scheduledTime}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Confirmed Schedule:</td>
-              <td style="padding:10px 0; color:#34d399; font-weight:bold;">${scheduledTime}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Urgency:</td>
+              <td class="row-value" style="padding:10px 0; color:${booking.urgency === 'Urgent' ? '#f87171' : '#f8fafc'}; font-weight:bold;">${(booking.urgency || 'NORMAL').toUpperCase()}</td>
             </tr>
             <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Urgency:</td>
-              <td style="padding:10px 0; color:${booking.urgency === 'Urgent' ? '#f87171' : '#f8fafc'}; font-weight:bold;">${(booking.urgency || 'NORMAL').toUpperCase()}</td>
-            </tr>
-            <tr style="border-bottom:1px solid #1e293b;">
-              <td style="padding:10px 0; color:#94a3b8;">Important Data:</td>
-              <td style="padding:10px 0; color:#f8fafc;">${booking.containsImportantData || 'NO'}</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Important Data:</td>
+              <td class="row-value" style="padding:10px 0; color:#f8fafc;">${booking.containsImportantData || 'NO'}</td>
             </tr>
             <tr>
-              <td style="padding:10px 0; color:#94a3b8;">Submitted Time:</td>
-              <td style="padding:10px 0; color:#38bdf8; font-weight:bold;">${getPeshawarDateTimeString(booking.createdAt)} (PKT)</td>
+              <td class="row-label" style="padding:10px 0; color:#94a3b8;">Submitted Time:</td>
+              <td class="row-value" style="padding:10px 0; color:#38bdf8; font-weight:bold;">${getPeshawarDateTimeString(booking.createdAt)} (PKT)</td>
             </tr>
           </tbody>
         </table>
@@ -1235,11 +1279,11 @@ function generateAppointmentConfirmedEmailHtml({
         </div>
 
         <!-- Direct Reply / Action Buttons -->
-        <div style="text-align:center; padding:10px 0;">
-          <a href="${waTechLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
+        <div class="btn-container" style="text-align:center; padding:10px 0;">
+          <a class="btn-item" href="${waTechLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
             💬 Reply on WhatsApp
           </a>
-          <a href="tel:${techPhone.replace(/\s+/g, '')}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
+          <a class="btn-item" href="tel:${techPhone.replace(/\s+/g, '')}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
             📞 Call Technician (${techPhone})
           </a>
         </div>
@@ -1268,17 +1312,35 @@ function generateTechnicianContactEmailHtml({
 
   return `
   <!DOCTYPE html>
-  <html>
+  <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <title>Technician Contacting You - TechFix Peshawar</title>
+    <style type="text/css">
+      body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+      table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+      @media only screen and (max-width: 600px) {
+        .email-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+        .email-pad { padding: 16px !important; }
+        .header-pad { padding: 20px 16px !important; }
+        .row-label { display: block !important; width: 100% !important; padding: 4px 0 2px 0 !important; font-size: 12px !important; color: #94a3b8 !important; }
+        .row-value { display: block !important; width: 100% !important; padding: 0 0 10px 0 !important; font-size: 14px !important; }
+        .btn-container { display: block !important; width: 100% !important; }
+        .btn-item { display: block !important; width: 100% !important; margin: 0 0 10px 0 !important; box-sizing: border-box !important; text-align: center !important; padding: 14px 20px !important; }
+      }
+      @media only screen and (min-width: 601px) and (max-width: 768px) {
+        .email-card { width: 94% !important; max-width: 620px !important; }
+        .email-pad { padding: 22px 20px !important; }
+      }
+    </style>
   </head>
-  <body style="margin:0; padding:24px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
-    <div style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
+  <body style="margin:0; padding:20px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
+    <div class="email-card" style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
       
       <!-- Header -->
-      <div style="background: linear-gradient(135deg, #2563eb, #0284c7); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
+      <div class="header-pad" style="background: linear-gradient(135deg, #2563eb, #0284c7); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
         <span style="display:inline-block; background-color:rgba(15, 23, 42, 0.7); color:#38bdf8; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:5px 14px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(56, 189, 248, 0.4);">
           ⚡ TECHNICIAN UPDATE • CONTACT INITIATED
         </span>
@@ -1291,7 +1353,7 @@ function generateTechnicianContactEmailHtml({
       </div>
 
       <!-- Body -->
-      <div style="padding: 28px 24px;">
+      <div class="email-pad" style="padding: 28px 24px;">
         <p style="margin:0 0 16px 0; font-size:15px; color:#e2e8f0; line-height:1.6;">
           Hello <strong>${booking.fullName}</strong>,
         </p>
@@ -1323,31 +1385,31 @@ function generateTechnicianContactEmailHtml({
           <table style="width:100%; border-collapse:collapse; font-size:13px;">
             <tbody>
               <tr>
-                <td style="padding:6px 0; color:#94a3b8; width:140px;">Booking Ref ID:</td>
-                <td style="padding:6px 0; color:#38bdf8; font-weight:bold; font-family:monospace;">${booking.id}</td>
+                <td class="row-label" style="padding:6px 0; color:#94a3b8; width:140px;">Booking Ref ID:</td>
+                <td class="row-value" style="padding:6px 0; color:#38bdf8; font-weight:bold; font-family:monospace;">${booking.id}</td>
               </tr>
               <tr>
-                <td style="padding:6px 0; color:#94a3b8;">Service:</td>
-                <td style="padding:6px 0; color:#fbbf24; font-weight:bold;">${booking.serviceRequired}</td>
+                <td class="row-label" style="padding:6px 0; color:#94a3b8;">Service:</td>
+                <td class="row-value" style="padding:6px 0; color:#fbbf24; font-weight:bold;">${booking.serviceRequired}</td>
               </tr>
               <tr>
-                <td style="padding:6px 0; color:#94a3b8;">Device:</td>
-                <td style="padding:6px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `— ${booking.computerBrandModel}` : ''}</td>
+                <td class="row-label" style="padding:6px 0; color:#94a3b8;">Device:</td>
+                <td class="row-value" style="padding:6px 0; color:#f8fafc;">${booking.deviceType} ${booking.computerBrandModel ? `— ${booking.computerBrandModel}` : ''}</td>
               </tr>
               <tr>
-                <td style="padding:6px 0; color:#94a3b8;">Location:</td>
-                <td style="padding:6px 0; color:#f8fafc;">${booking.area} (Peshawar)</td>
+                <td class="row-label" style="padding:6px 0; color:#94a3b8;">Location:</td>
+                <td class="row-value" style="padding:6px 0; color:#f8fafc;">${booking.area} (Peshawar)</td>
               </tr>
             </tbody>
           </table>
         </div>
 
         <!-- Direct CTA Buttons -->
-        <div style="text-align:center; padding:10px 0;">
-          <a href="${waTechLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
+        <div class="btn-container" style="text-align:center; padding:10px 0;">
+          <a class="btn-item" href="${waTechLink}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
             💬 Chat on WhatsApp
           </a>
-          <a href="tel:${techPhone.replace(/\s+/g, '')}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
+          <a class="btn-item" href="tel:${techPhone.replace(/\s+/g, '')}" style="display:inline-block; background-color:#2563eb; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; margin:6px; box-shadow:0 4px 14px rgba(37, 99, 235, 0.4);">
             📞 Call Technician (${techPhone})
           </a>
         </div>
@@ -3119,82 +3181,114 @@ app.post('/api/bookings', publicApiRateLimiter, async (req, res) => {
   const waReplyLink = `https://wa.me/${waNumber}?text=${encodeURIComponent(`Hello ${newBooking.fullName}, this is Safiullah from TechFix Peshawar regarding your ${newBooking.serviceRequired} request.`)}`;
 
   const bookingEmailHtml = `
-  <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b;">
-    <div style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center;">
-      <h1 style="margin: 0; font-size: 20px; color: #ffffff; letter-spacing: 1px;">NEW ON-SITE SERVICE REQUEST</h1>
-      <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
-    </div>
-    
-    <div style="padding: 24px;">
-      <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px; border-left: 4px solid #38bdf8;">
-        <p style="margin: 0 0 8px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Booking Reference</p>
-        <p style="margin: 0; font-size: 18px; font-weight: bold; color: #38bdf8; font-family: monospace;">${newBooking.id}</p>
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <style type="text/css">
+      body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+      table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+      @media only screen and (max-width: 600px) {
+        .email-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+        .email-pad { padding: 16px !important; }
+        .header-pad { padding: 20px 16px !important; }
+        .row-label { display: block !important; width: 100% !important; padding: 4px 0 2px 0 !important; font-size: 12px !important; color: #94a3b8 !important; }
+        .row-value { display: block !important; width: 100% !important; padding: 0 0 10px 0 !important; font-size: 14px !important; }
+        .btn-container { display: block !important; width: 100% !important; }
+        .btn-item { display: block !important; width: 100% !important; margin: 0 0 10px 0 !important; box-sizing: border-box !important; text-align: center !important; padding: 14px 20px !important; }
+      }
+      @media only screen and (min-width: 601px) and (max-width: 768px) {
+        .email-card { width: 94% !important; max-width: 620px !important; }
+        .email-pad { padding: 22px 20px !important; }
+      }
+    </style>
+  </head>
+  <body style="margin: 0; padding: 20px 0; background-color: #0b1120; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f8fafc;">
+    <div class="email-card" style="max-width: 600px; margin: 0 auto; background-color: #0f172a; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+      <div class="header-pad" style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
+        <h1 style="margin: 0; font-size: 20px; color: #ffffff; letter-spacing: 0.5px;">NEW ON-SITE SERVICE REQUEST</h1>
+        <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
       </div>
+      
+      <div class="email-pad" style="padding: 24px;">
+        <div style="background-color: #1e293b; border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; border-left: 4px solid #38bdf8;">
+          <p style="margin: 0 0 4px 0; font-size: 11px; color: #94a3b8; text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px;">Booking Reference</p>
+          <p style="margin: 0; font-size: 17px; font-weight: bold; color: #38bdf8; font-family: monospace;">${newBooking.id}</p>
+        </div>
 
-      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px; width: 140px;">Customer:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px; font-weight: bold;">${newBooking.fullName}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Primary Phone:</td>
-          <td style="padding: 8px 0; color: #38bdf8; font-size: 14px; font-weight: bold;"><a href="tel:${newBooking.phone}" style="color: #38bdf8; text-decoration: none;">${newBooking.phone}</a></td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">WhatsApp:</td>
-          <td style="padding: 8px 0; color: #34d399; font-size: 14px; font-weight: bold;"><a href="${waReplyLink}" style="color: #34d399; text-decoration: none;">${newBooking.whatsapp}</a></td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Area / Sector:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px; font-weight: bold;">${newBooking.area} (Peshawar)</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Service Required:</td>
-          <td style="padding: 8px 0; color: #fbbf24; font-size: 14px; font-weight: bold;">${newBooking.serviceRequired}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Device & Model:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `— ${newBooking.computerBrandModel}` : ''}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Preferred Schedule:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.preferredDate} (${newBooking.preferredTime})</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Urgency:</td>
-          <td style="padding: 8px 0; color: ${newBooking.urgency === 'Urgent' ? '#f87171' : '#f8fafc'}; font-size: 14px; font-weight: bold;">${newBooking.urgency.toUpperCase()}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Important Data:</td>
-          <td style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.containsImportantData}</td>
-        </tr>
-        <tr>
-          <td style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Submitted Time:</td>
-          <td style="padding: 8px 0; color: #38bdf8; font-size: 14px; font-weight: bold;">${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)</td>
-        </tr>
-      </table>
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px; width: 140px;">Customer:</td>
+            <td class="row-value" style="padding: 8px 0; color: #f8fafc; font-size: 14px; font-weight: bold;">${newBooking.fullName}</td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Customer Email:</td>
+            <td class="row-value" style="padding: 8px 0; color: #38bdf8; font-size: 14px; font-weight: bold;"><a href="mailto:${newBooking.email}" style="color: #38bdf8; text-decoration: none;">${newBooking.email || 'Not provided'}</a></td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Primary Phone:</td>
+            <td class="row-value" style="padding: 8px 0; color: #38bdf8; font-size: 14px; font-weight: bold;"><a href="tel:${newBooking.phone}" style="color: #38bdf8; text-decoration: none;">${newBooking.phone}</a></td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">WhatsApp:</td>
+            <td class="row-value" style="padding: 8px 0; color: #34d399; font-size: 14px; font-weight: bold;"><a href="${waReplyLink}" style="color: #34d399; text-decoration: none;">${newBooking.whatsapp}</a></td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Location / Area:</td>
+            <td class="row-value" style="padding: 8px 0; color: #f8fafc; font-size: 14px; font-weight: bold;">${newBooking.area} (Peshawar)</td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Service Required:</td>
+            <td class="row-value" style="padding: 8px 0; color: #fbbf24; font-size: 14px; font-weight: bold;">${newBooking.serviceRequired}</td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Device & Model:</td>
+            <td class="row-value" style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `— ${newBooking.computerBrandModel}` : ''}</td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Preferred Schedule:</td>
+            <td class="row-value" style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.preferredDate} (${newBooking.preferredTime})</td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Urgency:</td>
+            <td class="row-value" style="padding: 8px 0; color: ${newBooking.urgency === 'Urgent' ? '#f87171' : '#f8fafc'}; font-size: 14px; font-weight: bold;">${newBooking.urgency.toUpperCase()}</td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Important Data:</td>
+            <td class="row-value" style="padding: 8px 0; color: #f8fafc; font-size: 14px;">${newBooking.containsImportantData}</td>
+          </tr>
+          <tr>
+            <td class="row-label" style="padding: 8px 0; color: #94a3b8; font-size: 14px;">Submitted Time:</td>
+            <td class="row-value" style="padding: 8px 0; color: #38bdf8; font-size: 14px; font-weight: bold;">${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)</td>
+          </tr>
+        </table>
 
-      <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
-        <p style="margin: 0 0 8px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
-        <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${newBooking.problemDescription}</p>
+        <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+          <p style="margin: 0 0 8px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
+          <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${newBooking.problemDescription}</p>
+        </div>
+
+        <div class="btn-container" style="text-align: center;">
+          <a class="btn-item" href="${waReplyLink}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin: 4px 6px;">Reply on WhatsApp</a>
+          <a class="btn-item" href="tel:${newBooking.phone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin: 4px 6px;">Call Customer</a>
+        </div>
       </div>
-
-      <div style="text-align: center;">
-        <a href="${waReplyLink}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin-right: 10px;">Reply on WhatsApp</a>
-        <a href="tel:${newBooking.phone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px;">Call Customer</a>
+      
+      <div style="background-color: #090d16; padding: 16px; text-align: center; border-top: 1px solid #1e293b; font-size: 12px; color: #64748b;">
+        Dispatched automatically to ${NOTIFICATION_DESTINATION} • TechFix On-Site Computer Support Peshawar
       </div>
     </div>
-    
-    <div style="background-color: #090d16; padding: 16px; text-align: center; border-top: 1px solid #1e293b; font-size: 12px; color: #64748b;">
-      Dispatched automatically to ${NOTIFICATION_DESTINATION} • TechFix On-Site Computer Support Peshawar
-    </div>
-  </div>
+  </body>
+  </html>
   `;
 
   const bookingEmailText = `
 🔔 NEW ON-SITE SERVICE REQUEST / BOOKING
 ID: ${newBooking.id}
 Customer: ${newBooking.fullName}
+Email: ${newBooking.email || 'Not provided'}
 Phone: ${newBooking.phone}
 WhatsApp: ${newBooking.whatsapp}
 Area: ${newBooking.area} (Peshawar)
@@ -3212,13 +3306,18 @@ WhatsApp Quick Reply:
 ${waReplyLink}
 `;
 
-  // 1. Dispatch technician alert notification
-  dispatchEmail({
-    to: NOTIFICATION_DESTINATION,
-    subject: `[${newBooking.urgency.toUpperCase()}] New Booking: ${newBooking.fullName} (${newBooking.area}) - ${getPeshawarShortTimeString()}`,
-    html: bookingEmailHtml,
-    text: bookingEmailText
-  }).catch(err => console.error("Technician email dispatch catch:", err));
+  // 1. Dispatch technician alert notification (MUST await in serverless so Vercel doesn't freeze before sending)
+  try {
+    const techMailRes = await sendNotificationEmail({
+      to: NOTIFICATION_DESTINATION,
+      subject: `[${newBooking.urgency.toUpperCase()}] New Booking: ${newBooking.fullName} (${newBooking.area}) - ${getPeshawarShortTimeString()}`,
+      html: bookingEmailHtml,
+      text: bookingEmailText
+    });
+    console.log(`[BOOKING CREATED] Technician notification email delivered via ${techMailRes.provider} to ${techMailRes.sentTo}`);
+  } catch (err) {
+    console.error("Technician email dispatch catch:", err);
+  }
 
   // 2. Automated Confirmation Email directly to the Customer (if customer provided an email address)
   if (newBooking.email && newBooking.email.includes('@')) {
@@ -3228,13 +3327,31 @@ ${waReplyLink}
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <meta http-equiv="X-UA-Compatible" content="IE=edge">
       <title>Booking Confirmation - TechFix Peshawar</title>
+      <style type="text/css">
+        body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+        table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+        @media only screen and (max-width: 600px) {
+          .email-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+          .email-pad { padding: 16px !important; }
+          .header-pad { padding: 20px 16px !important; }
+          .row-label { display: block !important; width: 100% !important; padding: 4px 0 2px 0 !important; font-size: 12px !important; color: #94a3b8 !important; }
+          .row-value { display: block !important; width: 100% !important; padding: 0 0 10px 0 !important; font-size: 14px !important; }
+          .btn-container { display: block !important; width: 100% !important; }
+          .btn-item { display: block !important; width: 100% !important; margin: 0 0 10px 0 !important; box-sizing: border-box !important; text-align: center !important; padding: 14px 20px !important; }
+        }
+        @media only screen and (min-width: 601px) and (max-width: 768px) {
+          .email-card { width: 94% !important; max-width: 620px !important; }
+          .email-pad { padding: 22px 20px !important; }
+        }
+      </style>
     </head>
-    <body style="margin:0; padding:24px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
-      <div style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
+    <body style="margin:0; padding:20px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color:#f1f5f9;">
+      <div class="email-card" style="max-width:600px; margin:0 auto; background-color:#0f172a; border-radius:16px; overflow:hidden; border:1px solid #1e293b; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
         
         <!-- Header -->
-        <div style="background: linear-gradient(135deg, #0284c7, #0f766e); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
+        <div class="header-pad" style="background: linear-gradient(135deg, #0284c7, #0f766e); padding: 28px 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
           <div style="display:inline-block; background-color:rgba(15, 23, 42, 0.7); color:#38bdf8; font-size:11px; font-weight:bold; letter-spacing:1.5px; text-transform:uppercase; padding:4px 12px; border-radius:9999px; margin-bottom:10px; border:1px solid rgba(56, 189, 248, 0.4);">
             ✓ REQUEST RECEIVED & LOGGED
           </div>
@@ -3247,7 +3364,7 @@ ${waReplyLink}
         </div>
 
         <!-- Body -->
-        <div style="padding: 28px 24px;">
+        <div class="email-pad" style="padding: 28px 24px;">
           <p style="margin:0 0 16px 0; font-size:15px; color:#e2e8f0; line-height:1.6;">
             Hello <strong>${newBooking.fullName}</strong>,
           </p>
@@ -3269,30 +3386,30 @@ ${waReplyLink}
           <table style="width:100%; border-collapse:collapse; margin-bottom:20px; font-size:14px;">
             <tbody>
               <tr style="border-bottom:1px solid #1e293b;">
-                <td style="padding:10px 0; color:#94a3b8; width:140px;">Service:</td>
-                <td style="padding:10px 0; color:#fbbf24; font-weight:bold;">${newBooking.serviceRequired}</td>
+                <td class="row-label" style="padding:10px 0; color:#94a3b8; width:140px;">Service:</td>
+                <td class="row-value" style="padding:10px 0; color:#fbbf24; font-weight:bold;">${newBooking.serviceRequired}</td>
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
-                <td style="padding:10px 0; color:#94a3b8;">Device:</td>
-                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `(${newBooking.computerBrandModel})` : ''}</td>
+                <td class="row-label" style="padding:10px 0; color:#94a3b8;">Device:</td>
+                <td class="row-value" style="padding:10px 0; color:#f1f5f9;">${newBooking.deviceType} ${newBooking.computerBrandModel ? `(${newBooking.computerBrandModel})` : ''}</td>
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
-                <td style="padding:10px 0; color:#94a3b8;">Location / Area:</td>
-                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.area} (Peshawar)</td>
+                <td class="row-label" style="padding:10px 0; color:#94a3b8;">Location / Area:</td>
+                <td class="row-value" style="padding:10px 0; color:#f1f5f9;">${newBooking.area} (Peshawar)</td>
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
-                <td style="padding:10px 0; color:#94a3b8;">Preferred Window:</td>
-                <td style="padding:10px 0; color:#f1f5f9;">${newBooking.preferredDate} — ${newBooking.preferredTime}</td>
+                <td class="row-label" style="padding:10px 0; color:#94a3b8;">Preferred Window:</td>
+                <td class="row-value" style="padding:10px 0; color:#f1f5f9;">${newBooking.preferredDate} — ${newBooking.preferredTime}</td>
               </tr>
               <tr style="border-bottom:1px solid #1e293b;">
-                <td style="padding:10px 0; color:#94a3b8;">Data Safety Alert:</td>
-                <td style="padding:10px 0; color:${newBooking.containsImportantData === 'YES' ? '#38bdf8' : '#94a3b8'}; font-weight:bold;">
+                <td class="row-label" style="padding:10px 0; color:#94a3b8;">Data Safety Alert:</td>
+                <td class="row-value" style="padding:10px 0; color:${newBooking.containsImportantData === 'YES' ? '#38bdf8' : '#94a3b8'}; font-weight:bold;">
                   ${newBooking.containsImportantData === 'YES' ? 'PROTECTED (Important Data Flagged)' : 'Standard'}
                 </td>
               </tr>
               <tr>
-                <td style="padding:10px 0; color:#94a3b8;">Submitted At:</td>
-                <td style="padding:10px 0; color:#cbd5e1; font-size:13px;">${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)</td>
+                <td class="row-label" style="padding:10px 0; color:#94a3b8;">Submitted At:</td>
+                <td class="row-value" style="padding:10px 0; color:#cbd5e1; font-size:13px;">${getPeshawarDateTimeString(newBooking.createdAt)} (PKT)</td>
               </tr>
             </tbody>
           </table>
@@ -3311,8 +3428,8 @@ ${waReplyLink}
           </div>
 
           <!-- Direct WhatsApp Contact Button -->
-          <div style="text-align:center; padding-top:6px;">
-            <a href="https://wa.me/923275226107?text=${encodeURIComponent(`Hello Safiullah! I received my booking confirmation (${newBooking.id}) for ${newBooking.serviceRequired}.`)}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
+          <div class="btn-container" style="text-align:center; padding-top:6px;">
+            <a class="btn-item" href="https://wa.me/923275226107?text=${encodeURIComponent(`Hello Safiullah! I received my booking confirmation (${newBooking.id}) for ${newBooking.serviceRequired}.`)}" style="display:inline-block; background-color:#059669; color:#ffffff; text-decoration:none; padding:12px 24px; font-weight:700; border-radius:10px; font-size:14px; box-shadow:0 4px 14px rgba(5, 150, 105, 0.4);">
               💬 Chat with Technician on WhatsApp (0327 5226107)
             </a>
           </div>
@@ -3383,13 +3500,15 @@ Helpline / WhatsApp: +92 327 5226107
 });
 
 // Endpoint to send/relay email notifications to techfixpeshawar@gmail.com
-app.post('/api/notify-email', checkAdminAuth, async (req, res) => {
-  const { recipient, subject, bodyText, payload, html } = req.body;
-  const targetEmail = recipient || NOTIFICATION_DESTINATION;
+app.post('/api/notify-email', publicApiRateLimiter, async (req, res) => {
+  const { subject, bodyText, payload, html } = req.body;
+  // SECURITY: Always lock recipient to the administrator email to prevent open relaying
+  const targetEmail = NOTIFICATION_DESTINATION;
 
   let emailHtml = html;
   if (!emailHtml && payload) {
     const safeName = String(payload.customer_name || 'Customer').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeEmail = String(payload.customer_email || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeService = String(payload.service_required || 'PC Repair').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safePhone = String(payload.customer_phone || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeWhatsapp = String(payload.customer_whatsapp || safePhone).replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -3399,47 +3518,79 @@ app.post('/api/notify-email', checkAdminAuth, async (req, res) => {
     const waLink = payload.whatsapp_reply_link || `https://wa.me/${safePhone.replace(/[^0-9]/g, '')}`;
 
     emailHtml = `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b;">
-        <div style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center;">
-          <h1 style="margin: 0; font-size: 20px; color: #ffffff;">NEW ON-SITE SERVICE REQUEST</h1>
-          <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
-        </div>
-        <div style="padding: 24px;">
-          <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
-            <tr><td style="padding: 8px 0; color: #94a3b8; width: 140px;">Customer:</td><td style="padding: 8px 0; font-weight: bold; color: #f8fafc;">${safeName}</td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">Phone:</td><td style="padding: 8px 0;"><a href="tel:${safePhone}" style="color: #38bdf8; text-decoration: none;">${safePhone}</a></td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">WhatsApp:</td><td style="padding: 8px 0;"><a href="${waLink}" style="color: #34d399; text-decoration: none;">${safeWhatsapp}</a></td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">Location / Area:</td><td style="padding: 8px 0; color: #f8fafc;">${safeArea} (Peshawar)</td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">Service:</td><td style="padding: 8px 0; font-weight: bold; color: #fbbf24;">${safeService}</td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">Device / Model:</td><td style="padding: 8px 0; color: #f8fafc;">${safeModel}</td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">Preferred Slot:</td><td style="padding: 8px 0; color: #f8fafc;">${payload.preferred_date || ''} (${payload.preferred_time || ''})</td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">Urgency:</td><td style="padding: 8px 0; font-weight: bold; color: #f87171;">${String(payload.urgency || 'Normal').toUpperCase()}</td></tr>
-            <tr><td style="padding: 8px 0; color: #94a3b8;">Important Data:</td><td style="padding: 8px 0; color: #f8fafc;">${payload.contains_important_data || 'NO'}</td></tr>
-          </table>
-          <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
-            <p style="margin: 0 0 6px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
-            <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${safeDesc}</p>
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <style type="text/css">
+          body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+          table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+          @media only screen and (max-width: 600px) {
+            .email-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+            .email-pad { padding: 16px !important; }
+            .header-pad { padding: 20px 16px !important; }
+            .row-label { display: block !important; width: 100% !important; padding: 4px 0 2px 0 !important; font-size: 12px !important; color: #94a3b8 !important; }
+            .row-value { display: block !important; width: 100% !important; padding: 0 0 10px 0 !important; font-size: 14px !important; }
+            .btn-container { display: block !important; width: 100% !important; }
+            .btn-item { display: block !important; width: 100% !important; margin: 0 0 10px 0 !important; box-sizing: border-box !important; text-align: center !important; padding: 14px 20px !important; }
+          }
+          @media only screen and (min-width: 601px) and (max-width: 768px) {
+            .email-card { width: 94% !important; max-width: 620px !important; }
+            .email-pad { padding: 22px 20px !important; }
+          }
+        </style>
+      </head>
+      <body style="margin: 0; padding: 20px 0; background-color: #0b1120; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #f8fafc;">
+        <div class="email-card" style="max-width: 600px; margin: 0 auto; background-color: #0f172a; border-radius: 12px; overflow: hidden; border: 1px solid #1e293b; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+          <div class="header-pad" style="background: linear-gradient(135deg, #1e3a8a, #0284c7); padding: 24px; text-align: center; border-bottom: 2px solid #38bdf8;">
+            <h1 style="margin: 0; font-size: 20px; color: #ffffff; letter-spacing: 0.5px;">NEW ON-SITE SERVICE REQUEST</h1>
+            <p style="margin: 6px 0 0 0; font-size: 13px; color: #bae6fd;">TechFix Computer Support Peshawar</p>
           </div>
-          <div style="text-align: center;">
-            <a href="${waLink}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin-right: 10px;">Reply on WhatsApp</a>
-            <a href="tel:${safePhone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px;">Call Customer</a>
+          <div class="email-pad" style="padding: 24px;">
+            <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8; width: 140px;">Customer:</td><td class="row-value" style="padding: 8px 0; font-weight: bold; color: #f8fafc;">${safeName}</td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Customer Email:</td><td class="row-value" style="padding: 8px 0; color: #38bdf8; font-weight: bold;"><a href="mailto:${safeEmail}" style="color: #38bdf8; text-decoration: none;">${safeEmail || 'Not provided'}</a></td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Primary Phone:</td><td class="row-value" style="padding: 8px 0;"><a href="tel:${safePhone}" style="color: #38bdf8; text-decoration: none; font-weight: bold;">${safePhone}</a></td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">WhatsApp:</td><td class="row-value" style="padding: 8px 0;"><a href="${waLink}" style="color: #34d399; text-decoration: none; font-weight: bold;">${safeWhatsapp}</a></td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Location / Area:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc; font-weight: bold;">${safeArea} (Peshawar)</td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Service Required:</td><td class="row-value" style="padding: 8px 0; font-weight: bold; color: #fbbf24;">${safeService}</td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Device / Model:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc;">${safeModel}</td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Preferred Slot:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc;">${payload.preferred_date || ''} (${payload.preferred_time || ''})</td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Urgency:</td><td class="row-value" style="padding: 8px 0; font-weight: bold; color: #f87171;">${String(payload.urgency || 'Normal').toUpperCase()}</td></tr>
+              <tr><td class="row-label" style="padding: 8px 0; color: #94a3b8;">Important Data:</td><td class="row-value" style="padding: 8px 0; color: #f8fafc;">${payload.contains_important_data || 'NO'}</td></tr>
+            </table>
+            <div style="background-color: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
+              <p style="margin: 0 0 6px 0; font-size: 12px; color: #94a3b8; text-transform: uppercase; font-weight: bold;">Problem Description</p>
+              <p style="margin: 0; font-size: 14px; color: #e2e8f0; line-height: 1.5; white-space: pre-wrap;">${safeDesc}</p>
+            </div>
+            <div class="btn-container" style="text-align: center;">
+              <a class="btn-item" href="${waLink}" style="display: inline-block; background-color: #10b981; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin: 4px 6px;">Reply on WhatsApp</a>
+              <a class="btn-item" href="tel:${safePhone}" style="display: inline-block; background-color: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 24px; font-weight: bold; border-radius: 8px; font-size: 14px; margin: 4px 6px;">Call Customer</a>
+            </div>
+          </div>
+          <div style="background-color: #090d16; padding: 16px; text-align: center; border-top: 1px solid #1e293b; font-size: 12px; color: #64748b;">
+            Dispatched automatically to ${NOTIFICATION_DESTINATION} • TechFix On-Site Computer Support Peshawar
           </div>
         </div>
-      </div>
+      </body>
+      </html>
     `;
   }
 
-  const result = await dispatchEmail({
+  const result = await sendNotificationEmail({
     to: targetEmail,
     subject: subject || `New PC Service Alert: ${payload?.customer_name || 'Customer'}`,
     html: emailHtml,
-    text: bodyText || JSON.stringify(payload, null, 2)
+    text: bodyText || JSON.stringify(payload, null, 2),
+    lead: payload
   });
 
   db.activityLogs.unshift({
     id: `log-email-${Date.now()}`,
     action: "Email Notification Dispatched",
-    details: `Alert dispatched to ${targetEmail} for ${payload?.customer_name || 'Customer'} (${payload?.service_required || 'PC Repair'})`,
+    details: `Alert dispatched via ${result.provider} to ${targetEmail} for ${payload?.customer_name || 'Customer'} (${payload?.service_required || 'PC Repair'})`,
     timestamp: new Date().toISOString(),
     user: "Notification Trigger"
   });
@@ -3447,10 +3598,11 @@ app.post('/api/notify-email', checkAdminAuth, async (req, res) => {
   saveDb();
 
   res.json({
-    success: true,
+    success: result.status === 'sent',
     recipient: targetEmail,
-    delivered: result.delivered,
-    message: `Immediate notification logged and dispatched to ${targetEmail}`
+    provider: result.provider,
+    status: result.status,
+    message: `Immediate notification logged and dispatched via ${result.provider} to ${targetEmail}`
   });
 });
 
@@ -3804,10 +3956,24 @@ app.post('/api/admin/test-email', checkAdminAuth, async (req, res) => {
 
   const testHtml = `
   <!DOCTYPE html>
-  <html>
-  <head><meta charset="utf-8"></head>
-  <body style="margin:0; padding:20px; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#f8fafc;">
-    <div style="max-width:550px; margin:0 auto; background-color:#0f172a; border-radius:12px; overflow:hidden; border:1px solid #1e293b; padding:28px; text-align:center;">
+  <html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>TechFix Email Delivery Test</title>
+    <style type="text/css">
+      body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+      @media only screen and (max-width: 600px) {
+        .test-card { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; padding: 18px 14px !important; }
+      }
+      @media only screen and (min-width: 601px) and (max-width: 768px) {
+        .test-card { width: 94% !important; max-width: 580px !important; padding: 22px !important; }
+      }
+    </style>
+  </head>
+  <body style="margin:0; padding:20px 0; background-color:#0b1120; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color:#f8fafc;">
+    <div class="test-card" style="max-width:550px; margin:0 auto; background-color:#0f172a; border-radius:12px; overflow:hidden; border:1px solid #1e293b; padding:28px; text-align:center;">
       <div style="display:inline-block; background-color:rgba(56, 189, 248, 0.1); color:#38bdf8; font-size:12px; font-weight:bold; padding:4px 12px; border-radius:9999px; margin-bottom:12px; border:1px solid rgba(56, 189, 248, 0.3);">
         ✓ LIVE TEST DISPATCH
       </div>
